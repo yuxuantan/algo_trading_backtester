@@ -208,12 +208,12 @@ def main():
     # -------------------------------------------------
     # Optimizer callback
     # -------------------------------------------------
-    def run_once(p: dict[str, Any]):
-        sp_kwargs = dict(p)
-        if "pip_size" in strat.Params.__annotations__:
-            sp_kwargs["pip_size"] = cfg.pip_size
-
-        sp = strat.Params(**sp_kwargs)
+    def run_once(p):
+        try:
+            sp = strat.Params(**{**p, "pip_size": cfg.pip_size} if "pip_size" in strat.Params.__annotations__ else p)
+        except Exception as e:
+            print(f"[SKIP] bad params {p} -> {e}", flush=True)
+            return None
 
         df_feat = strat.compute_features(df, sp)
         df_sig = strat.compute_signals(df_feat)
@@ -315,6 +315,7 @@ def main():
         objective=args.objective,
         best_row=best,
         index_path="runs/_index.csv",
+        dataset_meta=dataset_meta
     )
 
     print(f"\n✔ Run complete. Artifacts saved to:\n{run_dir}")

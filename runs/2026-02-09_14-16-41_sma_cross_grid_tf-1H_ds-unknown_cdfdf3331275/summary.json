@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "best_params": {
+    "fast": 40.0,
+    "slow": 300.0,
+    "rr": 1.0,
+    "sl_buffer_pips": 0.5,
+    "pip_size": 0.0001
+  },
+  "best_metrics": {
+    "trades": 529,
+    "final_equity": 31268.742195008104,
+    "total_return_%": -68.7312578049919,
+    "max_drawdown_%": -69.03111526040693,
+    "win_rate_%": 42.53308128544423,
+    "profit_factor": 0.6434910292591789,
+    "avg_R": -0.21444600366016095
+  }
+}

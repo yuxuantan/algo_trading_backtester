@@ -1,13 +1,11 @@
 from datetime import datetime
 from quantbt.io.downloader import download_dukascopy_fx
 
-df = download_dukascopy_fx(
+download_dukascopy_fx(
     symbol="EURUSD",
     timeframe="1H",
     start=datetime(2010, 1, 1),
     end=datetime.now(),
-    save_path="data/processed/eurusd_1h.csv",
+    save_dir="data/processed",
+    file_ext="csv",   # or "parquet"
 )
-
-print(df.head())
-print(f"Saved {len(df)} rows to data/processed/eurusd_1h.csv")
