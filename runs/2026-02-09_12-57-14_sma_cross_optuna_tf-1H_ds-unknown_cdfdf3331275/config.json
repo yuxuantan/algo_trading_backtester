@@ -1,0 +1,51 @@
+{
+  "strategy": "sma_cross",
+  "optimizer": "optuna",
+  "dataset": "data/processed/eurusd_1h.csv",
+  "dataset_meta": {
+    "dataset_id": "unknown_cdfdf3331275",
+    "file_sha256": "cdfdf333127508d2576387d8df89b1830d5140012977743a590126b887766eae",
+    "file_path": "data/processed/eurusd_1h.csv"
+  },
+  "timeframe": "1H",
+  "objective": "total_return_%",
+  "min_trades": 30,
+  "param_space": {
+    "fast": [
+      20,
+      30,
+      40,
+      50,
+      60
+    ],
+    "slow": [
+      100,
+      150,
+      200,
+      250,
+      300
+    ],
+    "rr": [
+      1.0,
+      1.5,
+      2.0,
+      2.5,
+      3.0
+    ],
+    "sl_buffer_pips": [
+      0.5,
+      1.0,
+      2.0,
+      5.0,
+      10.0
+    ]
+  },
+  "backtest_config": {
+    "initial_equity": 100000.0,
+    "risk_pct": 0.01,
+    "spread_pips": 0.2,
+    "pip_size": 0.0001,
+    "conservative_same_bar": true,
+    "min_stop_dist": 1e-09
+  }
+}
