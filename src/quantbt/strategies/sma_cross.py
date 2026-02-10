@@ -100,3 +100,21 @@ def iter_entries(df: pd.DataFrame):
 
 # ---- Standard interface for universal runner ----
 Params = SMACrossParams
+
+# ---- Plugin-based strategy configuration ----
+STRATEGY = {
+    "entry": {
+        "mode": "all",
+        "rules": [
+            {"name": "sma_cross", "params": {"fast": 50, "slow": 200}},
+        ],
+    },
+    "exit": {
+        "name": "atr_brackets",
+        "params": {"rr": 2.0, "sldist_atr_mult": 1.5, "atr_period": 14},
+    },
+    "sizing": {
+        "name": "fixed_risk",
+        "params": {"risk_pct": 0.01},
+    },
+}

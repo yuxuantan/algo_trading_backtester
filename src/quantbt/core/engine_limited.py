@@ -12,6 +12,7 @@ def run_backtest_limited(
     entry_iter_fn,
     build_exit_fn,
     exit_params,
+    size_fn=None,
 ):
     """
     Minimal generic backtest:
@@ -55,6 +56,14 @@ def run_backtest_limited(
             exit_price = None
             exit_reason = None
 
+            # Track MFE/MAE while position is open (price units)
+            if side == "long":
+                pos["mfe"] = max(pos["mfe"], h - entry)
+                pos["mae"] = min(pos["mae"], l - entry)
+            else:
+                pos["mfe"] = max(pos["mfe"], entry - l)
+                pos["mae"] = min(pos["mae"], entry - h)
+
             if "hold_bars" in pos:
                 if i >= pos["exit_i"]:
                     exit_price = c  # exit at close of exit bar
@@ -92,6 +101,18 @@ def run_backtest_limited(
 
                 equity += pnl
 
+                mfe = float(pos.get("mfe", 0.0))
+                mae = float(pos.get("mae", 0.0))
+                stop_dist = pos.get("stop_dist")
+                mfe_r = (mfe / stop_dist) if stop_dist else np.nan
+                mae_r = (mae / stop_dist) if stop_dist else np.nan
+                mfe_dollars = mfe * units
+                if mfe_dollars > 0:
+                    realized = max(pnl, 0.0)
+                    giveback = (mfe_dollars - realized) / mfe_dollars
+                else:
+                    giveback = np.nan
+
                 trades.append({
                     "entry_time": pos["entry_time"],
                     "exit_time": t,
@@ -102,6 +123,11 @@ def run_backtest_limited(
                     "units": units,
                     "pnl": pnl,
                     "commission": commission,
+                    "mfe": mfe,
+                    "mae": mae,
+                    "mfe_R": mfe_r,
+                    "mae_R": mae_r,
+                    "giveback": giveback,
                     "equity_after": equity,
                 })
                 pos = None
@@ -132,10 +158,22 @@ def run_backtest_limited(
                 risk_dollars = equity * float(cfg.risk_pct)
 
                 if "hold_bars" in exit_spec:
-                    # time-exit uses a synthetic stop distance just for sizing (optional)
-                    # simplest: fixed notional sizing (or skip sizing entirely)
-                    # here: size 1 unit risk placeholder
-                    units = risk_dollars / (10 * cfg.pip_size)  # heuristic; replace later if you want
+                    if size_fn is not None:
+                        units = size_fn(
+                            cfg=cfg,
+                            equity=equity,
+                            side=side,
+                            entry_open=entry_open,
+                            exit_spec=exit_spec,
+                            entry=e,
+                        )
+                    else:
+                        # time-exit uses a synthetic stop distance just for sizing (optional)
+                        # simplest: fixed notional sizing (or skip sizing entirely)
+                        # here: size 1 unit risk placeholder
+                        units = risk_dollars / (10 * cfg.pip_size)  # heuristic; replace later if you want
+                    if units is None or not np.isfinite(units) or units <= 0:
+                        continue
                     pos = {
                         "side": side,
                         "entry": entry_open,
@@ -143,13 +181,26 @@ def run_backtest_limited(
                         "entry_time": e["entry_time"],
                         "hold_bars": int(exit_spec["hold_bars"]),
                         "exit_i": min(len(df) - 1, i + int(exit_spec["hold_bars"])),
+                        "mfe": 0.0,
+                        "mae": 0.0,
+                        "stop_dist": None,
                     }
                 else:
                     stop_dist = float(exit_spec["stop_dist"])
                     if stop_dist <= 0:
                         continue
-                    units = risk_dollars / stop_dist
-                    if not np.isfinite(units) or units <= 0:
+                    if size_fn is not None:
+                        units = size_fn(
+                            cfg=cfg,
+                            equity=equity,
+                            side=side,
+                            entry_open=entry_open,
+                            exit_spec=exit_spec,
+                            entry=e,
+                        )
+                    else:
+                        units = risk_dollars / stop_dist
+                    if units is None or not np.isfinite(units) or units <= 0:
                         continue
 
                     pos = {
@@ -159,15 +210,43 @@ def run_backtest_limited(
                         "tp": float(exit_spec["tp"]),
                         "units": units,
                         "entry_time": e["entry_time"],
+                        "mfe": 0.0,
+                        "mae": 0.0,
+                        "stop_dist": stop_dist,
                     }
 
     equity_df = pd.DataFrame(equity_curve).set_index("time")
     trades_df = pd.DataFrame(trades)
 
     total_return = (equity_df["equity"].iloc[-1] / float(cfg.initial_equity) - 1.0) * 100.0
+    commission_sum = float(trades_df["commission"].sum()) if "commission" in trades_df.columns else 0.0
+    if trades_df.empty:
+        win_rate = np.nan
+        avg_profit = np.nan
+        avg_mfe = np.nan
+        avg_mae = np.nan
+        avg_mfe_r = np.nan
+        avg_mae_r = np.nan
+        avg_giveback = np.nan
+    else:
+        win_rate = float((trades_df["pnl"] > 0).mean()) * 100.0
+        avg_profit = float(trades_df["pnl"].mean())
+        avg_mfe = float(trades_df["mfe"].mean()) if "mfe" in trades_df.columns else np.nan
+        avg_mae = float(trades_df["mae"].mean()) if "mae" in trades_df.columns else np.nan
+        avg_mfe_r = float(trades_df["mfe_R"].mean()) if "mfe_R" in trades_df.columns else np.nan
+        avg_mae_r = float(trades_df["mae_R"].mean()) if "mae_R" in trades_df.columns else np.nan
+        avg_giveback = float(trades_df["giveback"].mean()) if "giveback" in trades_df.columns else np.nan
     summary = {
         "trades": int(len(trades_df)),
         "final_equity": float(equity_df["equity"].iloc[-1]),
         "total_return_%": float(total_return),
+        "commission_sum": commission_sum,
+        "win_rate_%": win_rate,
+        "avg_profit_per_trade": avg_profit,
+        "avg_mfe": avg_mfe,
+        "avg_mae": avg_mae,
+        "avg_mfe_R": avg_mfe_r,
+        "avg_mae_R": avg_mae_r,
+        "avg_giveback": avg_giveback,
     }
     return equity_df, trades_df, summary
