@@ -12,6 +12,8 @@ class BacktestConfig:
     pip_size: float = 0.0001
     conservative_same_bar: bool = True
     min_stop_dist: float = 1e-9  # avoid insane sizing on tiny stops
+    commission_per_round_trip: float = 0.0  # dollars per 100k units (standard lot)
+    lot_size: float = 100_000.0
 
 def run_backtest_sma_cross(
     df_sig: pd.DataFrame,
@@ -78,14 +80,18 @@ def run_backtest_sma_cross(
 
             if exit_price is not None:
                 # simplified spread cost on entry+exit
+                commission = 0.0
+                if cfg.commission_per_round_trip and cfg.lot_size:
+                    commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
+
                 if side == "long":
                     entry_eff = entry + spread / 2
                     exit_eff = exit_price - spread / 2
-                    pnl = (exit_eff - entry_eff) * units
+                    pnl = (exit_eff - entry_eff) * units - commission
                 else:
                     entry_eff = entry - spread / 2
                     exit_eff = exit_price + spread / 2
-                    pnl = (entry_eff - exit_eff) * units
+                    pnl = (entry_eff - exit_eff) * units - commission
 
                 equity += pnl
 
@@ -100,6 +106,7 @@ def run_backtest_sma_cross(
                     "exit": exit_price,
                     "exit_reason": exit_reason,
                     "pnl": pnl,
+                    "commission": commission,
                     "equity_after": equity,
                     "r_multiple": pnl / pos["risk_dollars"] if pos["risk_dollars"] > 0 else np.nan
                 })

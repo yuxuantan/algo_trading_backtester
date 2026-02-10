@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import numpy as np
 import pandas as pd
 
@@ -33,6 +34,10 @@ def run_backtest_limited(
 
     entries = list(entry_iter_fn(df))
     entry_ptr = 0
+    try:
+        supports_entry = "entry" in inspect.signature(build_exit_fn).parameters
+    except (TypeError, ValueError):
+        supports_entry = False
 
     for i in range(len(df)):
         t = idx[i]
@@ -73,14 +78,17 @@ def run_backtest_limited(
                     exit_reason = "TP"
 
             if exit_price is not None:
+                commission = 0.0
+                if cfg.commission_per_round_trip and cfg.lot_size:
+                    commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
                 if side == "long":
                     entry_eff = entry + spread / 2
                     exit_eff = exit_price - spread / 2
-                    pnl = (exit_eff - entry_eff) * units
+                    pnl = (exit_eff - entry_eff) * units - commission
                 else:
                     entry_eff = entry - spread / 2
                     exit_eff = exit_price + spread / 2
-                    pnl = (entry_eff - exit_eff) * units
+                    pnl = (entry_eff - exit_eff) * units - commission
 
                 equity += pnl
 
@@ -93,6 +101,7 @@ def run_backtest_limited(
                     "exit_reason": exit_reason,
                     "units": units,
                     "pnl": pnl,
+                    "commission": commission,
                     "equity_after": equity,
                 })
                 pos = None
@@ -113,7 +122,10 @@ def run_backtest_limited(
                 prev_low = float(e["prev_low"])
                 prev_high = float(e["prev_high"])
 
-                exit_spec = build_exit_fn(side, entry_open, prev_low, prev_high, exit_params)
+                if supports_entry:
+                    exit_spec = build_exit_fn(side, entry_open, prev_low, prev_high, exit_params, entry=e)
+                else:
+                    exit_spec = build_exit_fn(side, entry_open, prev_low, prev_high, exit_params)
                 if exit_spec is None:
                     continue
 

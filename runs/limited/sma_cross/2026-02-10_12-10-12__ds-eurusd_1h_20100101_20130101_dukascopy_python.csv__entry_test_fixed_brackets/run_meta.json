@@ -1,0 +1,726 @@
+{
+  "strategy_module": "quantbt.strategies.sma_cross",
+  "strategy_tag": "sma_cross",
+  "dataset": "data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv",
+  "dataset_tag": "eurusd_1h_20100101_20130101_dukascopy_python.csv",
+  "test_name": "entry_test_fixed_brackets",
+  "entry_params_base": {
+    "fast": 50,
+    "slow": 200,
+    "rr": 2.0,
+    "sl_buffer_pips": 1.0,
+    "pip_size": 0.0001
+  },
+  "entry_param_space": [
+    {
+      "fast": 10,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 10,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 20,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 30,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 40,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 50,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 60,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 70,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 80,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 100,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 90,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 125,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 150,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 175,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 200,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 225,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 250,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 275,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 300,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    },
+    {
+      "fast": 100,
+      "slow": 325,
+      "rr": 2.0,
+      "sl_buffer_pips": 1.0,
+      "pip_size": 0.0001
+    }
+  ],
+  "config": {
+    "initial_equity": 100000.0,
+    "risk_pct": 0.01,
+    "spread_pips": 0.2,
+    "pip_size": 0.0001,
+    "conservative_same_bar": true,
+    "min_stop_dist": 1e-09
+  },
+  "atr_exit_params": {
+    "rr": 2.0,
+    "sldist_atr": 1.5,
+    "atr_period": 14
+  },
+  "favourable_rule": "total_return_% > 0",
+  "pass_threshold_%": 70.0,
+  "min_trades": 30,
+  "seed": 42
+}

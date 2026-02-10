@@ -1,11 +1,13 @@
-from datetime import datetime
+from dataclasses import asdict
 import itertools
+from pathlib import Path
 import random
 
 from quantbt.io.dataio import load_ohlc_csv
 from quantbt.core.engine import BacktestConfig
 from quantbt.core.engine_limited import run_backtest_limited
 from quantbt.experiments.limited.base import limited_test, limited_test_pass_rate
+from quantbt.experiments.limited.runlog import make_limited_run_dir, write_json
 from quantbt.experiments.limited.exits import (
     FixedBracketExitParams, build_fixed_brackets,
     TimeExitParams, build_time_exit
@@ -29,7 +31,8 @@ def limited_progress_printer(i, total, elapsed, last_summary, favourable_so_far)
     )
 
 def main():
-    df = load_ohlc_csv("data/processed/eurusd_1h_20100101_20260209_dukascopy_python.csv", ts_col="timestamp")
+    data_path = Path("data/processed/eurusd_1h_20100101_20260209_dukascopy_python.csv")
+    df = load_ohlc_csv(str(data_path), ts_col="timestamp")
 
     cfg = BacktestConfig(
         initial_equity=100_000,
@@ -47,6 +50,13 @@ def main():
     # favourable definition (edit as you like)
     favourable_fn = lambda s: float(s.get("total_return_%", -999)) > 0
 
+    strategy_name = "sma_cross"
+    run_dir = make_limited_run_dir(
+        strategy=strategy_name,
+        dataset_tag=data_path.name,
+        test_name="limited_tests",
+    )
+
     def make_param_sampler(param_list):
         if not param_list:
             raise ValueError("param_list is empty")
@@ -59,7 +69,7 @@ def main():
 
     # ========== TEST 1: Fixed SL/TP (vary rr + sl_buffer) ==========
     rr_values = [0.8, 1.0, 1.5, 2.0, 2.5, 3.0]
-    slb_values = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    slb_values = [0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0]
     fixed_param_space = [
         FixedBracketExitParams(rr=rr, sl_buffer_pips=slb, pip_size=cfg.pip_size)
         for rr, slb in itertools.product(rr_values, slb_values)
@@ -87,6 +97,22 @@ def main():
     time_param_space = [TimeExitParams(hold_bars=hb) for hb in hold_bars_values]
     sample_time = make_param_sampler(time_param_space)
 
+    run_meta = {
+        "strategy": strategy_name,
+        "dataset": str(data_path),
+        "dataset_tag": data_path.name,
+        "test_name": "limited_tests",
+        "entry_params": asdict(sp),
+        "config": asdict(cfg),
+        "fixed_param_space": [asdict(p) for p in fixed_param_space],
+        "time_param_space": [asdict(p) for p in time_param_space],
+        "favourable_rule": "total_return_% > 0",
+        "min_trades": 30,
+        "seed_fixed": 42,
+        "seed_time": 43,
+    }
+    write_json(run_dir / "run_meta.json", run_meta)
+
     res_time = limited_test(
         df_sig=df_sig,
         cfg=cfg,
@@ -106,9 +132,10 @@ def main():
     print(f"Fixed SL/TP favourable%: {pass_fixed:.1f}%  -> {'PASS' if pass_fixed >= 70 else 'FAIL'}")
     print(f"Time-exit favourable%:  {pass_time:.1f}%  -> {'PASS' if pass_time >= 70 else 'FAIL'}")
 
-    res_fixed.to_csv("runs/limited_fixed_brackets.csv", index=False)
-    res_time.to_csv("runs/limited_time_exit.csv", index=False)
-    print("Saved: runs/limited_fixed_brackets.csv, runs/limited_time_exit.csv")
+    res_fixed.to_csv(run_dir / "limited_fixed_brackets.csv", index=False)
+    res_time.to_csv(run_dir / "limited_time_exit.csv", index=False)
+    print(f"Saved: {run_dir}/limited_fixed_brackets.csv, {run_dir}/limited_time_exit.csv")
+    print(f"Run meta: {run_dir}/run_meta.json")
 
 
 if __name__ == "__main__":
