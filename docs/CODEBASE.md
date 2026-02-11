@@ -22,11 +22,14 @@ The code is organized under `src/quantbt` with runnable scripts under `scripts/`
 | `src/quantbt/experiments` | Run directory/index artifact helpers |
 | `src/quantbt/experiments/limited` | Limited-test criteria and logging helpers |
 | `src/quantbt/experiments/walkforward` | Walk-forward split, fitness, and orchestration helpers |
+| `src/quantbt/experiments/montecarlo` | Monte Carlo trade-order simulation and risk metrics |
 | `scripts/download_data.py` | CLI downloader for Dukascopy data |
 | `scripts/run_optimize.py` | CLI strategy optimizer |
 | `scripts/run_limited_tests.py` | CLI limited test runner (core/entry/exit/monkey variants) |
 | `scripts/run_walkforward.py` | CLI walk-forward analyzer (anchored/unanchored) |
 | `scripts/plot_oos_equity.py` | Interactive Plotly chart for walk-forward OOS equity/trades |
+| `scripts/run_monte_carlo.py` | CLI Monte Carlo simulator over OOS trade sequences |
+| `scripts/plot_monte_carlo.py` | Interactive Plotly chart for Monte Carlo distributions and paths |
 | `runs/` | Output artifacts from optimization and limited tests |
 | `data/processed/` | Local generated datasets and metadata |
 
@@ -152,6 +155,9 @@ Built-in SMA crossover strategy module.
 - `splits.py`: anchored/unanchored fold generation and in/out-period ratio validation.
 - `fitness.py`: walk-forward fitness metrics (`return_on_account`, linearity, absolute drawdown/margin proxies).
 - `runner.py`: full-data baseline optimization + fold-by-fold IS optimize/OOS evaluate orchestration.
+
+### `montecarlo/*`
+- `runner.py`: trade-sequence Monte Carlo with replacement/without replacement, risk-of-ruin, drawdown and return-ratio metrics.
 
 ## Scripts
 

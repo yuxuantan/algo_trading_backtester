@@ -315,7 +315,57 @@ This writes:
 
 Hover includes trade-level details (side, entry/exit, PnL, commission, R multiple) and fold window parameter tooltips.
 
-## 13. Notes
+## 13. Monte Carlo Simulation
+
+Purpose:
+
+- Randomize the order of OOS trades to estimate distribution of outcomes under sequencing uncertainty.
+- Measure:
+  - risk of ruin
+  - median max drawdown
+  - median return
+  - return/drawdown ratio
+
+Example:
+
+```bash
+python3 scripts/run_monte_carlo.py \
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e \
+  --n-sims 8000 \
+  --replace \
+  --ruin-equity 70000 \
+  --stop-at-ruin \
+  --pnl-mode actual \
+  --progress-every 200 \
+  --save-sample-paths-count 120
+```
+
+Default threshold checks in `mc_summary.json`:
+
+- `risk_of_ruin_pct < 10`
+- `median_max_drawdown_% < 40`
+- `median_return_% > 40`
+- `return_drawdown_ratio_ratio_of_medians > 2.0`
+
+Interactive Monte Carlo visualization:
+
+```bash
+python3 scripts/plot_monte_carlo.py \
+  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e/monte_carlo/run_XXXXXXXX
+```
+
+This writes:
+
+- `.../mc_interactive.html`
+
+Includes:
+
+- Equity path envelope (5/25/50/75/95 quantiles)
+- Sample equity paths
+- Return and drawdown distributions
+- Return vs drawdown scatter with ruin-hit highlighting
+
+## 14. Notes
 
 - The project currently wires `EURUSD` in downloader.
 - Limited tests intentionally prioritize robustness over finding one best parameter set.
