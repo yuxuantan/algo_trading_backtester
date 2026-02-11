@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import numpy as np
 import pandas as pd
+from quantbt.core.metrics import max_drawdown
 
 
 def run_backtest_limited(
@@ -219,6 +220,9 @@ def run_backtest_limited(
     trades_df = pd.DataFrame(trades)
 
     total_return = (equity_df["equity"].iloc[-1] / float(cfg.initial_equity) - 1.0) * 100.0
+    mdd = max_drawdown(equity_df["equity"])
+    mdd_pct = float(mdd * 100.0)
+    mdd_abs_pct = float(abs(mdd) * 100.0)
     commission_sum = float(trades_df["commission"].sum()) if "commission" in trades_df.columns else 0.0
     if trades_df.empty:
         win_rate = np.nan
@@ -240,6 +244,8 @@ def run_backtest_limited(
         "trades": int(len(trades_df)),
         "final_equity": float(equity_df["equity"].iloc[-1]),
         "total_return_%": float(total_return),
+        "max_drawdown_%": mdd_pct,
+        "max_drawdown_abs_%": mdd_abs_pct,
         "commission_sum": commission_sum,
         "win_rate_%": win_rate,
         "avg_profit_per_trade": avg_profit,

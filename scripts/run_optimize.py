@@ -46,7 +46,7 @@ def load_strategy(strategy_name: str):
 
 
 def build_param_space(strategy_name: str, args) -> dict[str, list]:
-    if strategy_name == "sma_cross":
+    if strategy_name == "sma_cross_test_strat":
         return {
             "fast": parse_int_list(args.fast),
             "slow": parse_int_list(args.slow),

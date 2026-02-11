@@ -1,34 +1,49 @@
-# CLI wrapper for spec-driven limited tests.
-#
-# Example (entry-only: SMA grid + fixed ATR exit):
-# python scripts/run_limited_tests.py \
-#   --strategy quantbt.strategies.sma_cross \
-#   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
-#   --entry-plugin sma_cross \
-#   --entry-params '{"fast":[10,20,30,40,50,60,70,80,90,100],"slow":[100,125,150,175,200,225,250,275,300,325]}' \
-#   --exit-plugin atr_brackets \
-#   --exit-params '{"rr":2.0,"sldist_atr_mult":1.5,"atr_period":14}' \
-#   --commission-rt 5
-#
-# Example (entry-only: SMA grid + time stop exit):
-# python scripts/run_limited_tests.py \
-#   --strategy quantbt.strategies.sma_cross \
-#   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
-#   --entry-plugin sma_cross \
-#   --entry-params '{"fast":[10,20,30,40,50,60,70,80,90,100],"slow":[100,125,150,175,200,225,250,275,300,325]}' \
-#   --exit-plugin time_exit \
-#   --exit-params '{"hold_bars":[5]}' \
-#   --commission-rt 5
-#
-# Example (exit-only: similar-approach Donchian entry, use strategy exit):
-# python scripts/run_limited_tests.py \
-#   --strategy quantbt.strategies.sma_cross \
-#   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
-#   --entry-plugin donchian_breakout \
-#   --entry-params '{"lookback":[10,20,30,40,50,60,70,80,90,100]}' \
-#   --favourable-criteria '{"total_return_%":{">":0}}' \
-#   --commission-rt 5
-#
+"""
+CLI wrapper for spec-driven limited tests.
+
+Example (entry-only: SMA grid + fixed ATR exit):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --entry-plugin sma_cross \
+  --entry-params '{"fast":[10,20,30,40,50,60,70,80,90,100],"slow":[100,125,150,175,200,225,250,275,300,325]}' \
+  --exit-plugin atr_brackets \
+  --exit-params '{"rr":2.0,"sldist_atr_mult":1.5,"atr_period":14}' \
+  --commission-rt 5
+
+Example (entry-only: SMA grid + time stop exit):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --entry-plugin sma_cross \
+  --entry-params '{"fast":[20,30,40,50,60,70,80],"slow":[125,150,175,200,225,250,275,300,325,350]}' \
+  --exit-plugin time_exit \
+  --exit-params '{"hold_bars":[1]}' \
+  --commission-rt 5
+
+Example (exit-only: similar-approach Donchian entry, use strategy exit):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --entry-plugin donchian_breakout \
+  --entry-params '{"lookback":[20]}' \
+  --favourable-criteria '{"total_return_%":{">":0}}' \
+  --exit-plugin atr_brackets \
+  --exit-params '{"rr":[1.0,1.5,2.0,2.5,3.0],"sldist_atr_mult":[0.5,1.0,1.5,2.0,2.5,3.0],"atr_period":14}' \
+  --commission-rt 5
+
+Example (monkey entry: random 132 entry signals, keep strategy exit):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --entry-plugin monkey_entry \
+  --entry-params '{"target_entries":132,"side":"both","long_ratio":0.5}' \
+  --seed-count 100 \
+  --seed-start 1 \
+  --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
+  --pass-threshold 90 \
+  --commission-rt 5
+"""
 
 from __future__ import annotations
 
@@ -94,11 +109,40 @@ def expand_params(params: dict) -> list[dict]:
     return combos
 
 
-def has_grid_params(params: dict) -> bool:
-    return any(isinstance(v, list) and not k.endswith("_values") for k, v in params.items())
+def _entry_plugin_names(entry_spec: dict) -> tuple[str, ...]:
+    rules = entry_spec.get("rules", [])
+    names = [str(rule.get("name", "")).strip() for rule in rules if str(rule.get("name", "")).strip()]
+    return tuple(sorted(names))
 
 
-def infer_test_name(strategy_spec: dict) -> str:
+def _exit_plugin_name(strategy_spec: dict) -> str:
+    return str(strategy_spec.get("exit", {}).get("name", "")).strip()
+
+
+def classify_test_focus(strategy_spec: dict, base_strategy_spec: dict) -> str:
+    current_entry = _entry_plugin_names(strategy_spec.get("entry", {}))
+    base_entry = _entry_plugin_names(base_strategy_spec.get("entry", {}))
+
+    current_exit = _exit_plugin_name(strategy_spec)
+    base_exit = _exit_plugin_name(base_strategy_spec)
+
+    entry_same = bool(current_entry) and current_entry == base_entry
+    exit_same = bool(current_exit) and current_exit == base_exit
+
+    if entry_same and exit_same:
+        return "core_system_test"
+    if entry_same and not exit_same:
+        return "entry_test"
+    if exit_same and not entry_same:
+        return "exit_test"
+
+    raise ValueError(
+        "Both entry and exit plugins differ from the base strategy. "
+        "This run is blocked because it is not testing the original strategy."
+    )
+
+
+def infer_test_name(strategy_spec: dict, *, test_focus: str) -> str:
     entry = strategy_spec.get("entry", {})
     exit_ = strategy_spec.get("exit", {})
     rules = entry.get("rules", [])
@@ -107,15 +151,8 @@ def infer_test_name(strategy_spec: dict) -> str:
     entry_tag = "+".join(entry_names)
     exit_name = str(exit_.get("name", "exit"))
 
-    entry_varies = any(has_grid_params(r.get("params", {})) for r in rules)
-    exit_varies = has_grid_params(exit_.get("params", {}))
-
-    if entry_varies and not exit_varies:
-        focus = "entry_test"
-    elif exit_varies and not entry_varies:
-        focus = "exit_test"
-    else:
-        focus = "entry_exit_test"
+    if test_focus not in {"core_system_test", "entry_test", "exit_test"}:
+        raise ValueError(f"unsupported test_focus: {test_focus}")
 
     exit_style_map = {
         "atr_brackets": "fixed_atr_exit",
@@ -123,7 +160,7 @@ def infer_test_name(strategy_spec: dict) -> str:
         "random_time_exit": "random_exit",
     }
     exit_tag = exit_style_map.get(exit_name, f"{exit_name}_exit")
-    return f"{focus}__{entry_tag}__{exit_tag}"
+    return f"{test_focus}__{entry_tag}__{exit_tag}"
 
 
 def iter_entries_from_signals(df_sig: pd.DataFrame, *, use_atr: bool):
@@ -377,6 +414,8 @@ def main():
 
     parser.add_argument("--entry-plugin", default=None, help="Override entry plugin name.")
     parser.add_argument("--entry-params", default=None, help="JSON for entry params (string or file).")
+    parser.add_argument("--seed-count", type=int, default=None, help="Generate a seed grid for entry params: seed=[seed_start..seed_start+seed_count-1].")
+    parser.add_argument("--seed-start", type=int, default=1, help="Start value for --seed-count seed grid.")
     parser.add_argument("--entry-mode", default=None, choices=["all", "any", "vote"], help="Entry combiner mode.")
     parser.add_argument("--vote-k", type=int, default=None, help="Vote threshold for entry mode.")
 
@@ -388,11 +427,17 @@ def main():
 
     args = parser.parse_args()
 
+    if args.seed_count is not None and args.seed_count <= 0:
+        raise ValueError("--seed-count must be > 0")
+    if args.seed_count is not None and args.entry_plugin is None:
+        raise ValueError("--seed-count requires --entry-plugin")
+
     mod = importlib.import_module(args.strategy)
     if not hasattr(mod, "STRATEGY"):
         raise ValueError(f"{args.strategy} missing STRATEGY dict")
 
-    spec = {"strategy": copy.deepcopy(mod.STRATEGY)}
+    base_strategy = copy.deepcopy(mod.STRATEGY)
+    spec = {"strategy": copy.deepcopy(base_strategy)}
     spec["data"] = args.data
     spec["ts_col"] = args.ts_col
 
@@ -417,6 +462,13 @@ def main():
 
     if args.entry_plugin is not None:
         entry_params = load_json_arg(args.entry_params) if args.entry_params else {}
+        if args.seed_count is not None:
+            existing_seed = entry_params.get("seed")
+            if isinstance(existing_seed, list):
+                raise ValueError("entry-params already contains seed list; remove it when using --seed-count")
+            start = int(args.seed_start)
+            stop = start + int(args.seed_count)
+            entry_params["seed"] = list(range(start, stop))
         spec["strategy"]["entry"] = {
             "mode": args.entry_mode or "all",
             "rules": [{"name": args.entry_plugin, "params": entry_params}],
@@ -443,7 +495,13 @@ def main():
     elif args.sizing_params is not None:
         raise ValueError("--sizing-params requires --sizing-plugin")
 
-    spec.setdefault("test", {}).setdefault("test_name", infer_test_name(spec["strategy"]))
+    test_focus = classify_test_focus(spec["strategy"], base_strategy)
+    spec.setdefault("test", {})["test_focus"] = test_focus
+    spec.setdefault("test", {})["core_system_test"] = (test_focus == "core_system_test")
+    spec.setdefault("test", {}).setdefault(
+        "test_name",
+        infer_test_name(spec["strategy"], test_focus=test_focus),
+    )
 
     run_spec(spec, progress_every=args.progress_every)
 

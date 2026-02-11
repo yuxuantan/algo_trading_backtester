@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 @dataclass(frozen=True)
-class SMACrossParams:
+class SMACrossTestStratParams:
     fast: int = 50
     slow: int = 200
     rr: float = 2.0
@@ -23,7 +23,7 @@ class SMACrossParams:
             raise ValueError(f"slow must be > fast. Got fast={self.fast}, slow={self.slow}")
 
 
-def compute_features(df: pd.DataFrame, p: SMACrossParams) -> pd.DataFrame:
+def compute_features(df: pd.DataFrame, p: SMACrossTestStratParams) -> pd.DataFrame:
     out = df.copy()
     out["sma_fast"] = out["close"].rolling(int(p.fast)).mean()
     out["sma_slow"] = out["close"].rolling(int(p.slow)).mean()
@@ -41,7 +41,7 @@ def build_brackets_from_signal(
     entry_open: float,
     prev_low: float,
     prev_high: float,
-    p: SMACrossParams,
+    p: SMACrossTestStratParams,
 ):
     """
     Returns (sl, tp, stop_dist) in price units, or None if invalid.
@@ -99,7 +99,8 @@ def iter_entries(df: pd.DataFrame):
 
 
 # ---- Standard interface for universal runner ----
-Params = SMACrossParams
+Params = SMACrossTestStratParams
+SMACrossParams = SMACrossTestStratParams
 
 # ---- Plugin-based strategy configuration ----
 STRATEGY = {
