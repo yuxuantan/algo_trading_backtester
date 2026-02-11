@@ -21,9 +21,11 @@ The code is organized under `src/quantbt` with runnable scripts under `scripts/`
 | `src/quantbt/optimisers` | Grid and Optuna optimization drivers |
 | `src/quantbt/experiments` | Run directory/index artifact helpers |
 | `src/quantbt/experiments/limited` | Limited-test criteria and logging helpers |
+| `src/quantbt/experiments/walkforward` | Walk-forward split, fitness, and orchestration helpers |
 | `scripts/download_data.py` | CLI downloader for Dukascopy data |
 | `scripts/run_optimize.py` | CLI strategy optimizer |
 | `scripts/run_limited_tests.py` | CLI limited test runner (core/entry/exit/monkey variants) |
+| `scripts/run_walkforward.py` | CLI walk-forward analyzer (anchored/unanchored) |
 | `runs/` | Output artifacts from optimization and limited tests |
 | `data/processed/` | Local generated datasets and metadata |
 
@@ -145,6 +147,11 @@ Built-in SMA crossover strategy module.
 - `runlog.py`: limited test run folder and JSON writing.
 - `base.py`: generic helper to compute limited test pass-rate.
 
+### `walkforward/*`
+- `splits.py`: anchored/unanchored fold generation and in/out-period ratio validation.
+- `fitness.py`: walk-forward fitness metrics (`return_on_account`, linearity, absolute drawdown/margin proxies).
+- `runner.py`: full-data baseline optimization + fold-by-fold IS optimize/OOS evaluate orchestration.
+
 ## Scripts
 
 ### `scripts/download_data.py`
@@ -164,6 +171,16 @@ Capabilities:
   - `--seed-count`, `--seed-start` for entry params
   - `--exit-seed-count`, `--exit-seed-start` for exit params
 - Criteria-based pass/fail and run artifact outputs.
+
+### `scripts/run_walkforward.py`
+Runs walk-forward validation with locked in/out-periods.
+
+Capabilities:
+
+- Anchored and unanchored fold modes
+- Optional full-data optimization baseline for comparison
+- Fold-level artifacts (`is_results.csv`, OOS trades/equity, fold summaries)
+- Aggregated OOS outputs (`folds.csv`, stitched OOS curve/trades, summary)
 
 ## Limited Test Output Contract
 

@@ -102,6 +102,20 @@ def iter_entries(df: pd.DataFrame):
 Params = SMACrossTestStratParams
 SMACrossParams = SMACrossTestStratParams
 
+
+PARAM_SPACE = {
+    "fast": [30, 50, 70],
+    "slow": [150, 200, 250],
+    "rr": [1.5, 2.0, 2.5],
+    "sl_buffer_pips": [1.0, 2.0],
+}
+
+
+def constraints(params: dict) -> bool:
+    if "fast" in params and "slow" in params:
+        return int(params["slow"]) > int(params["fast"])
+    return True
+
 # ---- Plugin-based strategy configuration ----
 STRATEGY = {
     "entry": {

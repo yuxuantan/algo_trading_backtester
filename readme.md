@@ -251,7 +251,58 @@ python3 scripts/run_optimize.py \
   --min-trades 30
 ```
 
-## 12. Notes
+## 12. Walk-Forward Analysis
+
+Purpose:
+
+- Optimize on in-sample (IS), test on next out-of-sample (OOS), and roll forward.
+- Compare aggregated OOS performance against a full-data optimization baseline.
+
+Key defaults aligned with the book workflow:
+
+- OOS/IS ratio is enforced to be between 10% and 50%.
+- Full-data baseline optimization runs first (disable with `--no-baseline-full-data`).
+- Objective defaults to `return_on_account`:
+  - `net_profit_abs / (max_drawdown_abs + required_margin_abs)`
+- If `--param-space` is empty (or all params are singletons), no optimization is run and fixed params are tested fold-by-fold.
+
+Example (anchored WFA with grid optimization):
+
+```bash
+python3 scripts/run_walkforward.py \
+  --strategy sma_cross_test_strat \
+  --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --optimizer grid \
+  --objective return_on_account \
+  --is-bars 2000 \
+  --oos-bars 400 \
+  --step-bars 400 \
+  --min-trades 30 \
+  --commission-rt 5
+```
+
+Example (unanchored WFA):
+
+```bash
+python3 scripts/run_walkforward.py \
+  --strategy sma_cross_test_strat \
+  --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --unanchored \
+  --is-bars 2000 \
+  --oos-bars 400 \
+  --step-bars 400
+```
+
+Key outputs:
+
+- `runs/walkforward/.../config.json`
+- `runs/walkforward/.../baseline_results.csv` (if baseline enabled)
+- `runs/walkforward/.../folds.csv`
+- `runs/walkforward/.../oos_equity_curve.csv`
+- `runs/walkforward/.../oos_trades.csv`
+- `runs/walkforward/.../summary.json`
+
+## 13. Notes
 
 - The project currently wires `EURUSD` in downloader.
 - Limited tests intentionally prioritize robustness over finding one best parameter set.
