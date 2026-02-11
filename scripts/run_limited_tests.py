@@ -55,6 +55,20 @@ python scripts/run_limited_tests.py \
   --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
   --pass-threshold 90 \
   --commission-rt 5
+
+Example (monkey entry + monkey exit):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --entry-plugin monkey_entry \
+  --entry-params '{"target_entries":132,"side":"both","long_ratio":0.5}' \
+  --seed-count 100 \
+  --seed-start 1 \
+  --exit-plugin monkey_exit \
+  --exit-params '{"avg_hold_bars":15.75}' \
+  --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
+  --pass-threshold 90 \
+  --commission-rt 5
 """
 
 from __future__ import annotations
@@ -127,8 +141,31 @@ def _entry_plugin_names(entry_spec: dict) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+MONKEY_ENTRY_PLUGINS = {"monkey_entry", "random"}
+MONKEY_EXIT_PLUGINS = {"monkey_exit", "random_time_exit"}
+
+
 def _exit_plugin_name(strategy_spec: dict) -> str:
     return str(strategy_spec.get("exit", {}).get("name", "")).strip()
+
+
+def _apply_seed_grid(
+    params: dict,
+    *,
+    count: int | None,
+    start: int,
+    count_flag: str,
+    params_flag: str,
+) -> None:
+    if count is None:
+        return
+    existing_seed = params.get("seed")
+    if existing_seed is not None:
+        raise ValueError(
+            f"{params_flag} already contains 'seed'; remove it when using {count_flag}"
+        )
+    stop = int(start) + int(count)
+    params["seed"] = list(range(int(start), stop))
 
 
 def classify_test_focus(strategy_spec: dict, base_strategy_spec: dict) -> str:
@@ -147,10 +184,13 @@ def classify_test_focus(strategy_spec: dict, base_strategy_spec: dict) -> str:
         return "entry_test"
     if exit_same and not entry_same:
         return "exit_test"
+    if set(current_entry).issubset(MONKEY_ENTRY_PLUGINS) and current_exit in MONKEY_EXIT_PLUGINS:
+        return "monkey_entry_exit_test"
 
     raise ValueError(
         "Both entry and exit plugins differ from the base strategy. "
-        "This run is blocked because it is not testing the original strategy."
+        "This run is blocked because it is not testing the original strategy "
+        "(only monkey_entry+monkey_exit is allowed as an exception)."
     )
 
 
@@ -163,7 +203,7 @@ def infer_test_name(strategy_spec: dict, *, test_focus: str) -> str:
     entry_tag = "+".join(entry_names)
     exit_name = str(exit_.get("name", "exit"))
 
-    if test_focus not in {"core_system_test", "entry_test", "exit_test"}:
+    if test_focus not in {"core_system_test", "entry_test", "exit_test", "monkey_entry_exit_test"}:
         raise ValueError(f"unsupported test_focus: {test_focus}")
 
     exit_style_map = {
@@ -450,6 +490,12 @@ def main():
         raise ValueError("--exit-seed-count must be > 0")
     if args.exit_seed_count is not None and args.exit_plugin is None:
         raise ValueError("--exit-seed-count requires --exit-plugin")
+    if args.seed_count is not None and args.exit_seed_count is not None:
+        print(
+            "[INFO] Both --seed-count and --exit-seed-count are set. "
+            "Iterations use Cartesian product (entry seeds x exit seeds).",
+            flush=True,
+        )
 
     mod = importlib.import_module(args.strategy)
     if not hasattr(mod, "STRATEGY"):
@@ -481,13 +527,13 @@ def main():
 
     if args.entry_plugin is not None:
         entry_params = load_json_arg(args.entry_params) if args.entry_params else {}
-        if args.seed_count is not None:
-            existing_seed = entry_params.get("seed")
-            if isinstance(existing_seed, list):
-                raise ValueError("entry-params already contains seed list; remove it when using --seed-count")
-            start = int(args.seed_start)
-            stop = start + int(args.seed_count)
-            entry_params["seed"] = list(range(start, stop))
+        _apply_seed_grid(
+            entry_params,
+            count=args.seed_count,
+            start=args.seed_start,
+            count_flag="--seed-count",
+            params_flag="entry-params",
+        )
         spec["strategy"]["entry"] = {
             "mode": args.entry_mode or "all",
             "rules": [{"name": args.entry_plugin, "params": entry_params}],
@@ -504,13 +550,13 @@ def main():
 
     if args.exit_plugin is not None:
         exit_params = load_json_arg(args.exit_params) if args.exit_params else {}
-        if args.exit_seed_count is not None:
-            existing_seed = exit_params.get("seed")
-            if isinstance(existing_seed, list):
-                raise ValueError("exit-params already contains seed list; remove it when using --exit-seed-count")
-            start = int(args.exit_seed_start)
-            stop = start + int(args.exit_seed_count)
-            exit_params["seed"] = list(range(start, stop))
+        _apply_seed_grid(
+            exit_params,
+            count=args.exit_seed_count,
+            start=args.exit_seed_start,
+            count_flag="--exit-seed-count",
+            params_flag="exit-params",
+        )
         spec["strategy"]["exit"] = {"name": args.exit_plugin, "params": exit_params}
     elif args.exit_params is not None:
         raise ValueError("--exit-params requires --exit-plugin")

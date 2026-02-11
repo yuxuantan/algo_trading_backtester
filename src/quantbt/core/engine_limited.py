@@ -43,7 +43,6 @@ def run_backtest_limited(
 
     for i in range(len(df)):
         t = idx[i]
-        o = float(df.iloc[i]["open"])
         h = float(df.iloc[i]["high"])
         l = float(df.iloc[i]["low"])
         c = float(df.iloc[i]["close"])
@@ -236,6 +235,8 @@ def run_backtest_limited(
         avg_mae_r = np.nan
         avg_giveback = np.nan
         avg_bars_held = np.nan
+        long_trade_pct = np.nan
+        short_trade_pct = np.nan
     else:
         win_rate = float((trades_df["pnl"] > 0).mean()) * 100.0
         avg_profit = float(trades_df["pnl"].mean())
@@ -245,6 +246,8 @@ def run_backtest_limited(
         avg_mae_r = float(trades_df["mae_R"].mean()) if "mae_R" in trades_df.columns else np.nan
         avg_giveback = float(trades_df["giveback"].mean()) if "giveback" in trades_df.columns else np.nan
         avg_bars_held = float(trades_df["bars_held"].mean()) if "bars_held" in trades_df.columns else np.nan
+        long_trade_pct = float((trades_df["side"] == "long").mean() * 100.0) if "side" in trades_df.columns else np.nan
+        short_trade_pct = float((trades_df["side"] == "short").mean() * 100.0) if "side" in trades_df.columns else np.nan
     summary = {
         "trades": int(len(trades_df)),
         "final_equity": float(equity_df["equity"].iloc[-1]),
@@ -252,6 +255,8 @@ def run_backtest_limited(
         "max_drawdown_%": mdd_pct,
         "max_drawdown_abs_%": mdd_abs_pct,
         "avg_bars_held": avg_bars_held,
+        "long_trade_pct": long_trade_pct,
+        "short_trade_pct": short_trade_pct,
         "commission_sum": commission_sum,
         "win_rate_%": win_rate,
         "avg_profit_per_trade": avg_profit,

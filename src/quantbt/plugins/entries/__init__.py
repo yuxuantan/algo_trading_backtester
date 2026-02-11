@@ -1,1 +1,1 @@
-# entry plugins live here
+"""Entry plugins."""

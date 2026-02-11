@@ -42,7 +42,6 @@ def run_backtest_sma_cross(
 
     for i in range(len(df)):
         t = idx[i]
-        o = float(df.at[t, "open"])
         h = float(df.at[t, "high"])
         l = float(df.at[t, "low"])
 

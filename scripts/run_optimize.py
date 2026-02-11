@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import time
 from typing import Any
 
 from quantbt.io.dataio import load_ohlc_csv
@@ -186,8 +185,6 @@ def main():
             f"obj={obj:.2f} | best={best_so_far['value']:.2f} | params={info['params']}",
             flush=True
         )
-
-    start_ts = time.time()
 
     def progress_printer(i, total, params, summary, elapsed, rows_so_far):
         obj = summary.get(args.objective)

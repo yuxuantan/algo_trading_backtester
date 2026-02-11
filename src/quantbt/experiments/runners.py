@@ -81,11 +81,12 @@ def append_run_index(
     objective: str,
     best_row: dict,
     index_path: str = "runs/_index.csv",
-    dataset_meta: str,
+    dataset_meta: dict[str, Any] | None = None,
 ) -> None:
     """
     Maintains a cumulative runs index you can sort/filter later.
     """
+    dataset_meta = dataset_meta or {}
     row = {
         "run_id": run_dir.name,
         "created_at": datetime.now().isoformat(timespec="seconds"),

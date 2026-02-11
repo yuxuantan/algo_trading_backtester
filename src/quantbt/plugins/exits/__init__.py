@@ -1,1 +1,1 @@
-# exit plugins live here
+"""Exit plugins."""

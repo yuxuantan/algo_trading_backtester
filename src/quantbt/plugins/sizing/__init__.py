@@ -1,1 +1,1 @@
-# sizing plugins live here
+"""Sizing plugins."""
