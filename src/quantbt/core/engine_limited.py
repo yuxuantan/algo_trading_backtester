@@ -117,6 +117,7 @@ def run_backtest_limited(
                 trades.append({
                     "entry_time": pos["entry_time"],
                     "exit_time": t,
+                    "bars_held": int(i - int(pos.get("entry_i", i))),
                     "side": side,
                     "entry": entry,
                     "exit": exit_price,
@@ -178,6 +179,7 @@ def run_backtest_limited(
                     pos = {
                         "side": side,
                         "entry": entry_open,
+                        "entry_i": i,
                         "units": units,
                         "entry_time": e["entry_time"],
                         "hold_bars": int(exit_spec["hold_bars"]),
@@ -207,6 +209,7 @@ def run_backtest_limited(
                     pos = {
                         "side": side,
                         "entry": entry_open,
+                        "entry_i": i,
                         "sl": float(exit_spec["sl"]),
                         "tp": float(exit_spec["tp"]),
                         "units": units,
@@ -232,6 +235,7 @@ def run_backtest_limited(
         avg_mfe_r = np.nan
         avg_mae_r = np.nan
         avg_giveback = np.nan
+        avg_bars_held = np.nan
     else:
         win_rate = float((trades_df["pnl"] > 0).mean()) * 100.0
         avg_profit = float(trades_df["pnl"].mean())
@@ -240,12 +244,14 @@ def run_backtest_limited(
         avg_mfe_r = float(trades_df["mfe_R"].mean()) if "mfe_R" in trades_df.columns else np.nan
         avg_mae_r = float(trades_df["mae_R"].mean()) if "mae_R" in trades_df.columns else np.nan
         avg_giveback = float(trades_df["giveback"].mean()) if "giveback" in trades_df.columns else np.nan
+        avg_bars_held = float(trades_df["bars_held"].mean()) if "bars_held" in trades_df.columns else np.nan
     summary = {
         "trades": int(len(trades_df)),
         "final_equity": float(equity_df["equity"].iloc[-1]),
         "total_return_%": float(total_return),
         "max_drawdown_%": mdd_pct,
         "max_drawdown_abs_%": mdd_abs_pct,
+        "avg_bars_held": avg_bars_held,
         "commission_sum": commission_sum,
         "win_rate_%": win_rate,
         "avg_profit_per_trade": avg_profit,

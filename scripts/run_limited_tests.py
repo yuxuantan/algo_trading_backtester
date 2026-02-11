@@ -43,6 +43,18 @@ python scripts/run_limited_tests.py \
   --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
   --pass-threshold 90 \
   --commission-rt 5
+
+Example (monkey exit: random exit timing around core avg bars held):
+python scripts/run_limited_tests.py \
+  --strategy quantbt.strategies.sma_cross_test_strat \
+  --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --exit-plugin monkey_exit \
+  --exit-params '{"avg_hold_bars":15.75}' \
+  --exit-seed-count 100 \
+  --exit-seed-start 1 \
+  --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
+  --pass-threshold 90 \
+  --commission-rt 5
 """
 
 from __future__ import annotations
@@ -158,6 +170,7 @@ def infer_test_name(strategy_spec: dict, *, test_focus: str) -> str:
         "atr_brackets": "fixed_atr_exit",
         "time_exit": "time_exit",
         "random_time_exit": "random_exit",
+        "monkey_exit": "monkey_exit",
     }
     exit_tag = exit_style_map.get(exit_name, f"{exit_name}_exit")
     return f"{test_focus}__{entry_tag}__{exit_tag}"
@@ -421,6 +434,8 @@ def main():
 
     parser.add_argument("--exit-plugin", default=None, help="Override exit plugin name.")
     parser.add_argument("--exit-params", default=None, help="JSON for exit params (string or file).")
+    parser.add_argument("--exit-seed-count", type=int, default=None, help="Generate a seed grid for exit params: seed=[exit_seed_start..exit_seed_start+exit_seed_count-1].")
+    parser.add_argument("--exit-seed-start", type=int, default=1, help="Start value for --exit-seed-count seed grid.")
 
     parser.add_argument("--sizing-plugin", default=None, help="Override sizing plugin name.")
     parser.add_argument("--sizing-params", default=None, help="JSON for sizing params (string or file).")
@@ -431,6 +446,10 @@ def main():
         raise ValueError("--seed-count must be > 0")
     if args.seed_count is not None and args.entry_plugin is None:
         raise ValueError("--seed-count requires --entry-plugin")
+    if args.exit_seed_count is not None and args.exit_seed_count <= 0:
+        raise ValueError("--exit-seed-count must be > 0")
+    if args.exit_seed_count is not None and args.exit_plugin is None:
+        raise ValueError("--exit-seed-count requires --exit-plugin")
 
     mod = importlib.import_module(args.strategy)
     if not hasattr(mod, "STRATEGY"):
@@ -485,6 +504,13 @@ def main():
 
     if args.exit_plugin is not None:
         exit_params = load_json_arg(args.exit_params) if args.exit_params else {}
+        if args.exit_seed_count is not None:
+            existing_seed = exit_params.get("seed")
+            if isinstance(existing_seed, list):
+                raise ValueError("exit-params already contains seed list; remove it when using --exit-seed-count")
+            start = int(args.exit_seed_start)
+            stop = start + int(args.exit_seed_count)
+            exit_params["seed"] = list(range(start, stop))
         spec["strategy"]["exit"] = {"name": args.exit_plugin, "params": exit_params}
     elif args.exit_params is not None:
         raise ValueError("--exit-params requires --exit-plugin")
