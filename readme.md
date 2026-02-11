@@ -302,6 +302,19 @@ Key outputs:
 - `runs/walkforward/.../oos_trades.csv`
 - `runs/walkforward/.../summary.json`
 
+Interactive OOS equity visualization:
+
+```bash
+python3 scripts/plot_oos_equity.py \
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e
+```
+
+This writes:
+
+- `.../oos_equity_interactive.html`
+
+Hover includes trade-level details (side, entry/exit, PnL, commission, R multiple) and fold window parameter tooltips.
+
 ## 13. Notes
 
 - The project currently wires `EURUSD` in downloader.

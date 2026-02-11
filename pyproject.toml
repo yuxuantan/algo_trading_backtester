@@ -16,6 +16,7 @@ dependencies = [
   "pandas>=1.5",
   "numpy>=1.23",
   "optuna>=3.0",
+  "plotly>=5.0",
   "dukascopy-python>=4.0.1",
 ]
 

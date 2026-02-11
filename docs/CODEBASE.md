@@ -26,6 +26,7 @@ The code is organized under `src/quantbt` with runnable scripts under `scripts/`
 | `scripts/run_optimize.py` | CLI strategy optimizer |
 | `scripts/run_limited_tests.py` | CLI limited test runner (core/entry/exit/monkey variants) |
 | `scripts/run_walkforward.py` | CLI walk-forward analyzer (anchored/unanchored) |
+| `scripts/plot_oos_equity.py` | Interactive Plotly chart for walk-forward OOS equity/trades |
 | `runs/` | Output artifacts from optimization and limited tests |
 | `data/processed/` | Local generated datasets and metadata |
 
