@@ -1,0 +1,27 @@
+# Python caches and bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS files
+.DS_Store
+
+# Local experiment outputs and large local datasets
+runs/
+data/processed/
+
+# Keep tracked sample data folder (if used)
+!data/samples/
+!data/samples/**

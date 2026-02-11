@@ -50,6 +50,7 @@ from quantbt.experiments.limited.criteria import parse_favourable_criteria, crit
 from quantbt.experiments.limited.runlog import make_limited_run_dir, write_json
 from quantbt.plugins import load_default_plugins, get_entry, get_exit, get_sizing
 from quantbt.plugins.combiner import combine_signals
+from quantbt.io.datasets import read_dataset_meta, dataset_tag_for_runs
 
 
 def load_json_arg(value: str) -> dict:
@@ -91,6 +92,38 @@ def expand_params(params: dict) -> list[dict]:
         item.update(dict(zip(grid_keys, values)))
         combos.append(item)
     return combos
+
+
+def has_grid_params(params: dict) -> bool:
+    return any(isinstance(v, list) and not k.endswith("_values") for k, v in params.items())
+
+
+def infer_test_name(strategy_spec: dict) -> str:
+    entry = strategy_spec.get("entry", {})
+    exit_ = strategy_spec.get("exit", {})
+    rules = entry.get("rules", [])
+
+    entry_names = [str(r.get("name", "entry")) for r in rules] or ["entry"]
+    entry_tag = "+".join(entry_names)
+    exit_name = str(exit_.get("name", "exit"))
+
+    entry_varies = any(has_grid_params(r.get("params", {})) for r in rules)
+    exit_varies = has_grid_params(exit_.get("params", {}))
+
+    if entry_varies and not exit_varies:
+        focus = "entry_test"
+    elif exit_varies and not entry_varies:
+        focus = "exit_test"
+    else:
+        focus = "entry_exit_test"
+
+    exit_style_map = {
+        "atr_brackets": "fixed_atr_exit",
+        "time_exit": "time_exit",
+        "random_time_exit": "random_exit",
+    }
+    exit_tag = exit_style_map.get(exit_name, f"{exit_name}_exit")
+    return f"{focus}__{entry_tag}__{exit_tag}"
 
 
 def iter_entries_from_signals(df_sig: pd.DataFrame, *, use_atr: bool):
@@ -227,15 +260,19 @@ def run_spec(spec: dict, *, progress_every: int = 10):
     min_trades = int(spec.get("test", {}).get("min_trades", 30))
     pass_threshold = float(spec.get("test", {}).get("pass_threshold_pct", 70.0))
 
+    dataset_meta = read_dataset_meta(data_path)
+    dataset_tag = dataset_tag_for_runs(data_path, dataset_meta)
+
     run_dir = make_limited_run_dir(
         base=spec.get("test", {}).get("run_base", "runs/limited"),
         strategy=spec.get("test", {}).get("strategy_tag", entry_spec.get("tag", "spec")),
-        dataset_tag=data_path.name,
+        dataset_tag=dataset_tag,
         test_name=spec.get("test", {}).get("test_name", "limited_test"),
     )
 
     run_meta = {
         "spec": spec,
+        "dataset_meta": dataset_meta,
         "criteria": criteria,
         "pass_threshold_%": pass_threshold,
         "min_trades": min_trades,
@@ -325,7 +362,7 @@ def run_spec(spec: dict, *, progress_every: int = 10):
     print(f"Saved: {run_dir}/limited_results.csv")
 
 def main():
-    parser = argparse.ArgumentParser(description="CLI wrapper around spec-driven limited tests.")
+    parser = argparse.ArgumentParser(description="Run limited tests with plugin overrides.")
     parser.add_argument("--strategy", required=True, help="Strategy module path with STRATEGY dict.")
     parser.add_argument("--data", required=True, help="Path to OHLCV CSV.")
     parser.add_argument("--ts-col", default="timestamp")
@@ -405,6 +442,8 @@ def main():
         spec["strategy"]["sizing"] = {"name": args.sizing_plugin, "params": sizing_params}
     elif args.sizing_params is not None:
         raise ValueError("--sizing-params requires --sizing-plugin")
+
+    spec.setdefault("test", {}).setdefault("test_name", infer_test_name(spec["strategy"]))
 
     run_spec(spec, progress_every=args.progress_every)
 

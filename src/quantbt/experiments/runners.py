@@ -5,25 +5,40 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
 
 def _safe(s: Any) -> str:
-    return str(s).replace(" ", "").replace("/", "-").replace(":", "-")
+    return (
+        str(s)
+        .strip()
+        .replace(" ", "_")
+        .replace("/", "-")
+        .replace(":", "-")
+        .replace(".", "_")
+        .lower()
+    )
 
 
 def make_run_dir(
+    *,
     base: str = "runs",
-    name: str = "run",
-    tags: dict[str, Any] | None = None,
+    mode: str = "optimize",
+    strategy: str,
+    dataset_tag: str,
+    variant: str | None = None,
+    label: str | None = None,
 ) -> Path:
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    tag_str = ""
-    if tags:
-        parts = [f"{k}-{_safe(v)}" for k, v in tags.items()]
-        tag_str = "_" + "_".join(parts)
-    run_dir = Path(base) / f"{ts}_{name}{tag_str}"
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    rid = uuid4().hex[:8]
+    run_name = f"{ts}_{_safe(label)}_{rid}" if label else f"{ts}_{rid}"
+
+    run_dir = Path(base) / _safe(mode) / _safe(strategy) / _safe(dataset_tag)
+    if variant:
+        run_dir = run_dir / _safe(variant)
+    run_dir = run_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 
@@ -73,7 +88,8 @@ def append_run_index(
     """
     row = {
         "run_id": run_dir.name,
-        "created_at": run_dir.name.split("_", 2)[0] + " " + run_dir.name.split("_", 2)[1].replace("-", ":"),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "run_path": str(run_dir),
         "strategy": strategy,
         "optimizer": optimizer,
         "dataset": dataset,

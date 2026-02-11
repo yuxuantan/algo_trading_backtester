@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,59 @@ def read_dataset_meta(csv_path: str | Path) -> dict[str, Any] | None:
     if not meta_path.exists():
         return None
     return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def _to_yyyymmdd(value: Any) -> str | None:
+    if value is None:
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return ts.strftime("%Y%m%d")
+
+
+def dataset_tag_for_runs(csv_path: str | Path, meta: dict[str, Any] | None = None) -> str:
+    """
+    Preferred run folder tag:
+      symbol_timeframe_start_end
+    Falls back to dataset_id, then filename+hash.
+    """
+    csv_path = Path(csv_path)
+
+    # Prefer explicit date span in filename if it follows standard naming.
+    m = re.match(
+        r"(?i)^(?P<symbol>[^_]+)_(?P<tf>[^_]+)_(?P<start>\d{8})_(?P<end>\d{8})(?:_.+)?$",
+        csv_path.stem,
+    )
+    if m:
+        return (
+            f"{m.group('symbol').lower()}_"
+            f"{m.group('tf').lower()}_"
+            f"{m.group('start')}_"
+            f"{m.group('end')}"
+        )
+
+    meta = meta or read_dataset_meta(csv_path)
+    if meta:
+        symbol = str(meta.get("symbol", "dataset")).lower()
+        timeframe = str(meta.get("timeframe", "tf")).lower()
+        extra = meta.get("extra") or {}
+
+        req_start = _to_yyyymmdd(extra.get("requested_start"))
+        req_end = _to_yyyymmdd(extra.get("requested_end"))
+        if req_start and req_end:
+            return f"{symbol}_{timeframe}_{req_start}_{req_end}"
+
+        start = _to_yyyymmdd(meta.get("start"))
+        end = _to_yyyymmdd(meta.get("end"))
+        if start and end:
+            return f"{symbol}_{timeframe}_{start}_{end}"
+
+        dataset_id = meta.get("dataset_id")
+        if dataset_id:
+            return str(dataset_id).lower()
+
+    return f"{csv_path.stem.lower()}_{sha256_file(csv_path)[:8]}"
 
 
 def compute_dataset_meta_from_df(

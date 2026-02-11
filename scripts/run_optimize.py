@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from quantbt.io.dataio import load_ohlc_csv
-from quantbt.io.datasets import read_dataset_meta, sha256_file
+from quantbt.io.datasets import read_dataset_meta, sha256_file, dataset_tag_for_runs
 from quantbt.core.engine import BacktestConfig, run_backtest_sma_cross
 from quantbt.optimisers.grid import grid_search
 from quantbt.experiments.runners import (
@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--ts-col", default="timestamp")
     ap.add_argument("--timeframe", default="")
+    ap.add_argument("--run-base", default="runs")
 
     # Objective / constraints
     ap.add_argument("--objective", default="total_return_%")
@@ -149,9 +150,11 @@ def main():
     # Run directory
     # -------------------------------------------------
     run_dir = make_run_dir(
-        base="runs",
-        name=f"{args.strategy}_{args.optimizer}",
-        tags={"tf": args.timeframe or "NA", "ds": dataset_meta["dataset_id"]},
+        base=args.run_base,
+        mode="optimize",
+        strategy=args.strategy,
+        dataset_tag=dataset_tag_for_runs(args.dataset, dataset_meta),
+        variant=args.optimizer,
     )
 
     save_artifacts(
@@ -314,7 +317,7 @@ def main():
         timeframe=args.timeframe,
         objective=args.objective,
         best_row=best,
-        index_path="runs/_index.csv",
+        index_path=f"{args.run_base}/_index.csv",
         dataset_meta=dataset_meta
     )
 
