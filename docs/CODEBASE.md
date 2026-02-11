@@ -136,6 +136,12 @@ Built-in SMA crossover strategy module.
 
 ### `limited/*`
 - `criteria.py`: parse and evaluate favourable criteria.
+- `naming.py`: classify test focus (`core_system_test`, `entry_test`, `exit_test`, monkey exception) and infer run-folder prefixes.
+- `spec_building.py`: CLI argument schema, seed-grid validation, and final test-spec assembly.
+- `data_prep.py`: CSV loading, timestamp index prep, ATR calculation, and signal-frame shaping.
+- `param_grid.py`: parameter expansion and validated entry/exit parameter-space construction.
+- `progress.py`: shared progress-line formatting/printing helpers.
+- `runner.py`: orchestration layer that composes the helper modules and writes run artifacts.
 - `runlog.py`: limited test run folder and JSON writing.
 - `base.py`: generic helper to compute limited test pass-rate.
 
@@ -148,7 +154,7 @@ CLI downloader.
 Runs parameter optimization for a strategy module.
 
 ### `scripts/run_limited_tests.py`
-Main limited testing orchestrator.
+Thin CLI wrapper around `quantbt.experiments.limited.spec_building` and `quantbt.experiments.limited.runner`.
 
 Capabilities:
 
