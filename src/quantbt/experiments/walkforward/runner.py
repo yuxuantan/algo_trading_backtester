@@ -4,9 +4,11 @@ import copy
 import importlib
 import json
 from dataclasses import asdict
+from itertools import product
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from quantbt.core.engine import BacktestConfig, run_backtest_sma_cross
@@ -16,7 +18,7 @@ from quantbt.io.datasets import dataset_tag_for_runs, read_dataset_meta, sha256_
 from quantbt.optimisers.grid import grid_search
 from quantbt.optimisers.optuna_opt import optuna_search
 
-from .fitness import enrich_summary_with_fitness
+from .fitness import build_initial_review_report, enrich_summary_with_fitness
 from .splits import WalkForwardFold, build_walkforward_splits, validate_oos_ratio
 
 
@@ -190,6 +192,122 @@ def _sort_results(df: pd.DataFrame, *, objective: str, direction: str) -> pd.Dat
     return df.sort_values(objective, ascending=asc).reset_index(drop=True)
 
 
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _value_key(value: Any) -> str:
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.12g}"
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    return str(value)
+
+
+def _plateau_candidate_from_results(
+    *,
+    results: pd.DataFrame,
+    param_space: dict[str, list],
+    objective: str,
+    direction: str,
+    min_neighbors: int,
+    stability_penalty: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if results.empty:
+        return None, None
+    if objective not in results.columns:
+        return None, None
+
+    param_keys = [k for k in param_space.keys() if k in results.columns]
+    if not param_keys:
+        return None, None
+
+    index_maps: dict[str, dict[str, int]] = {}
+    for k in param_keys:
+        index_maps[k] = {_value_key(v): i for i, v in enumerate(param_space.get(k, []))}
+
+    direction_sign = 1.0 if direction == "maximize" else -1.0
+    coord_to_row_idx: dict[tuple[int, ...], int] = {}
+    coord_to_score: dict[tuple[int, ...], float] = {}
+    coord_to_raw_obj: dict[tuple[int, ...], float] = {}
+
+    for row_idx, row in results.iterrows():
+        coord: list[int] = []
+        valid = True
+        for k in param_keys:
+            key = _value_key(row.get(k))
+            if key not in index_maps[k]:
+                valid = False
+                break
+            coord.append(index_maps[k][key])
+        if not valid:
+            continue
+
+        raw_obj = _as_float(row.get(objective))
+        if not np.isfinite(raw_obj):
+            continue
+        c = tuple(coord)
+        coord_to_row_idx[c] = int(row_idx)
+        coord_to_raw_obj[c] = float(raw_obj)
+        coord_to_score[c] = float(direction_sign * raw_obj)
+
+    if not coord_to_row_idx:
+        return None, None
+
+    d = len(param_keys)
+    offsets = [o for o in product((-1, 0, 1), repeat=d) if any(x != 0 for x in o)]
+
+    best_coord: tuple[int, ...] | None = None
+    best_score = -float("inf")
+    best_meta: dict[str, Any] | None = None
+
+    for coord, own_score in coord_to_score.items():
+        neighbor_scores: list[float] = []
+        for off in offsets:
+            cand = tuple(coord[i] + off[i] for i in range(d))
+            if cand in coord_to_score:
+                neighbor_scores.append(coord_to_score[cand])
+
+        if len(neighbor_scores) < int(min_neighbors):
+            continue
+
+        neighborhood = np.array([own_score, *neighbor_scores], dtype=float)
+        neighborhood = neighborhood[np.isfinite(neighborhood)]
+        if len(neighborhood) < int(min_neighbors) + 1:
+            continue
+
+        median_score = float(np.median(neighborhood))
+        std_score = float(np.std(neighborhood))
+        positive_ratio = float(np.mean(neighborhood > 0))
+
+        # Prefer broad, consistently favourable neighborhoods.
+        if positive_ratio < 0.50:
+            continue
+
+        plateau_score = float(median_score - (float(stability_penalty) * std_score))
+        if (best_coord is None) or (plateau_score > best_score):
+            best_coord = coord
+            best_score = plateau_score
+            best_meta = {
+                "plateau_score": plateau_score,
+                "plateau_neighbor_count": int(len(neighbor_scores)),
+                "plateau_positive_ratio": positive_ratio,
+                "plateau_median_score": median_score,
+                "plateau_std_score": std_score,
+                "selection_mode_used": "plateau",
+            }
+
+    if best_coord is None or best_meta is None:
+        return None, None
+
+    selected_row = results.iloc[int(coord_to_row_idx[best_coord])].to_dict()
+    best_meta["selected_objective"] = coord_to_raw_obj[best_coord]
+    return selected_row, best_meta
+
+
 def optimize_slice(
     *,
     df: pd.DataFrame,
@@ -202,7 +320,11 @@ def optimize_slice(
     optimizer: str,
     objective: str,
     direction: str,
-    min_trades: int,
+    min_is_trades: int,
+    max_top_trade_share: float,
+    selection_mode: str,
+    plateau_min_neighbors: int,
+    plateau_stability_penalty: float,
     n_trials: int,
     timeout_s: int,
     sampler: str,
@@ -232,7 +354,10 @@ def optimize_slice(
         if out is None:
             return None
         _eq, _trades, summary = out
-        if int(summary.get("trades", 0)) < int(min_trades):
+        if int(summary.get("trades", 0)) < int(min_is_trades):
+            return None
+        top_share = _as_float(summary.get("top_trade_share"))
+        if np.isfinite(top_share) and float(max_top_trade_share) < 1.0 and top_share > float(max_top_trade_share):
             return None
         if objective not in summary:
             return None
@@ -247,6 +372,7 @@ def optimize_slice(
         summary = run_once(fixed_params)
         if summary is None:
             raise RuntimeError("Fixed-parameter evaluation failed on slice")
+        summary["selection_mode_used"] = "fixed"
         row = {**fixed_params, **summary}
         results = pd.DataFrame([row])
         return fixed_params, summary, results
@@ -323,9 +449,46 @@ def optimize_slice(
         raise ValueError(f"unsupported optimizer: {optimizer}")
 
     if results.empty:
-        raise RuntimeError("optimizer produced no valid rows for slice")
+        raise RuntimeError(
+            "optimizer produced no valid rows for slice "
+            f"(min_is_trades={min_is_trades}, max_top_trade_share={max_top_trade_share}, objective={objective})"
+        )
 
-    best = results.iloc[0].to_dict()
+    selection_meta: dict[str, Any] = {"selection_mode_used": "peak"}
+    best: dict[str, Any]
+    if selection_mode == "plateau":
+        if optimizer != "grid":
+            if progress_prefix:
+                print(
+                    f"{progress_prefix} plateau selection only supports grid cleanly; falling back to peak selection",
+                    flush=True,
+                )
+            best = results.iloc[0].to_dict()
+            selection_meta = {"selection_mode_used": "peak_fallback_non_grid"}
+        else:
+            plateau_row, plateau_meta = _plateau_candidate_from_results(
+                results=results,
+                param_space=param_space,
+                objective=objective,
+                direction=direction,
+                min_neighbors=plateau_min_neighbors,
+                stability_penalty=plateau_stability_penalty,
+            )
+            if plateau_row is None:
+                if progress_prefix:
+                    print(
+                        f"{progress_prefix} plateau neighborhood not found; falling back to peak selection",
+                        flush=True,
+                    )
+                best = results.iloc[0].to_dict()
+                selection_meta = {"selection_mode_used": "peak_fallback_no_plateau"}
+            else:
+                best = plateau_row
+                selection_meta = plateau_meta or {"selection_mode_used": "plateau"}
+    else:
+        best = results.iloc[0].to_dict()
+        selection_meta = {"selection_mode_used": "peak"}
+
     best_params = {k: best[k] for k in param_space.keys() if k in best}
 
     out = evaluate_on_slice(
@@ -342,6 +505,7 @@ def optimize_slice(
     if out is None:
         raise RuntimeError("best parameter replay failed on slice")
     _eq, _trades, best_summary = out
+    best_summary.update(selection_meta)
     return best_params, best_summary, results
 
 
@@ -402,7 +566,16 @@ def run_walkforward(
     optimizer: str,
     objective: str,
     direction: str,
+    optimization_mode: str,
+    selection_mode: str,
     min_trades: int,
+    min_is_trades: int,
+    min_oos_trades: int,
+    max_top_trade_share: float,
+    wfe_metric: str,
+    wfe_min_pct: float,
+    plateau_min_neighbors: int,
+    plateau_stability_penalty: float,
     is_bars: int,
     oos_bars: int,
     step_bars: int | None,
@@ -426,6 +599,19 @@ def run_walkforward(
     param_space = resolve_param_space(strategy_mod, param_space_arg)
     warmup = infer_warmup_bars(param_space) if warmup_bars is None else int(warmup_bars)
 
+    if selection_mode not in ("peak", "plateau"):
+        raise ValueError("selection_mode must be 'peak' or 'plateau'")
+    if plateau_min_neighbors < 0:
+        raise ValueError("plateau_min_neighbors must be >= 0")
+    if plateau_stability_penalty < 0:
+        raise ValueError("plateau_stability_penalty must be >= 0")
+    if min_is_trades < 0 or min_oos_trades < 0:
+        raise ValueError("min trade thresholds must be >= 0")
+    if max_top_trade_share <= 0:
+        raise ValueError("max_top_trade_share must be > 0")
+    if wfe_min_pct < 0:
+        raise ValueError("wfe_min_pct must be >= 0")
+
     validate_oos_ratio(is_bars, oos_bars)
 
     df = load_ohlc_csv(dataset, ts_col=ts_col)
@@ -443,7 +629,8 @@ def run_walkforward(
     print(
         f"[WFA] mode={'anchored' if anchored else 'unanchored'} "
         f"folds={len(folds)} is_bars={is_bars} oos_bars={oos_bars} "
-        f"step_bars={step_bars if step_bars is not None else oos_bars}",
+        f"step_bars={step_bars if step_bars is not None else oos_bars} "
+        f"optimization_mode={optimization_mode} selection_mode={selection_mode}",
         flush=True,
     )
 
@@ -462,9 +649,18 @@ def run_walkforward(
         "dataset": dataset,
         "dataset_meta": dataset_meta,
         "optimizer": optimizer,
+        "optimization_mode": optimization_mode,
+        "selection_mode": selection_mode,
         "objective": objective,
         "direction": direction,
         "min_trades": min_trades,
+        "min_is_trades": min_is_trades,
+        "min_oos_trades": min_oos_trades,
+        "max_top_trade_share": max_top_trade_share,
+        "wfe_metric": wfe_metric,
+        "wfe_min_pct": wfe_min_pct,
+        "plateau_min_neighbors": plateau_min_neighbors,
+        "plateau_stability_penalty": plateau_stability_penalty,
         "is_bars": is_bars,
         "oos_bars": oos_bars,
         "step_bars": step_bars if step_bars is not None else oos_bars,
@@ -495,7 +691,11 @@ def run_walkforward(
             optimizer=optimizer,
             objective=objective,
             direction=direction,
-            min_trades=min_trades,
+            min_is_trades=min_is_trades,
+            max_top_trade_share=max_top_trade_share,
+            selection_mode=selection_mode,
+            plateau_min_neighbors=plateau_min_neighbors,
+            plateau_stability_penalty=plateau_stability_penalty,
             n_trials=n_trials,
             timeout_s=timeout_s,
             sampler=sampler,
@@ -526,6 +726,8 @@ def run_walkforward(
     stitched_trades_parts = []
     current_oos_equity = cfg.initial_equity
     oos_under_min_count = 0
+    wfe_valid_count = 0
+    wfe_pass_count = 0
 
     for fold in folds:
         print(
@@ -549,7 +751,11 @@ def run_walkforward(
             optimizer=optimizer,
             objective=objective,
             direction=direction,
-            min_trades=min_trades,
+            min_is_trades=min_is_trades,
+            max_top_trade_share=max_top_trade_share,
+            selection_mode=selection_mode,
+            plateau_min_neighbors=plateau_min_neighbors,
+            plateau_stability_penalty=plateau_stability_penalty,
             n_trials=n_trials,
             timeout_s=timeout_s,
             sampler=sampler,
@@ -582,9 +788,25 @@ def run_walkforward(
             raise RuntimeError(f"OOS evaluation failed for fold {fold.fold}")
 
         oos_equity, oos_trades, oos_summary = oos_eval
-        oos_min_trades_met = int(oos_summary.get("trades", 0)) >= int(min_trades)
+        oos_min_trades_met = int(oos_summary.get("trades", 0)) >= int(min_oos_trades)
         if not oos_min_trades_met:
             oos_under_min_count += 1
+
+        direction_sign = 1.0 if direction == "maximize" else -1.0
+        is_metric_raw = _as_float(is_summary.get(wfe_metric))
+        oos_metric_raw = _as_float(oos_summary.get(wfe_metric))
+        is_metric_scored = direction_sign * is_metric_raw
+        oos_metric_scored = direction_sign * oos_metric_raw
+
+        if np.isfinite(is_metric_scored) and np.isfinite(oos_metric_scored) and is_metric_scored > 0:
+            wfe_pct = float((oos_metric_scored / is_metric_scored) * 100.0)
+            wfe_pass = bool(wfe_pct >= float(wfe_min_pct))
+            wfe_valid_count += 1
+            if wfe_pass:
+                wfe_pass_count += 1
+        else:
+            wfe_pct = float("nan")
+            wfe_pass = False
 
         current_oos_equity = float(oos_summary["final_equity"])
 
@@ -596,6 +818,10 @@ def run_walkforward(
                 "best_params": best_params,
                 "is_summary": is_summary,
                 "oos_summary": oos_summary,
+                "wfe_metric": wfe_metric,
+                "wfe_pct": wfe_pct,
+                "wfe_min_pct": float(wfe_min_pct),
+                "wfe_pass": wfe_pass,
             },
         )
 
@@ -610,6 +836,10 @@ def run_walkforward(
 
         fold_row = _fold_to_row(df, fold, best_params, is_summary, oos_summary)
         fold_row["oos_min_trades_met"] = oos_min_trades_met
+        fold_row["wfe_metric"] = wfe_metric
+        fold_row["wfe_pct"] = wfe_pct
+        fold_row["wfe_min_pct"] = float(wfe_min_pct)
+        fold_row["wfe_pass"] = wfe_pass
         fold_rows.append(fold_row)
         stitched_equity_parts.append(oos_equity)
         stitched_trades_parts.append(oos_trades)
@@ -617,7 +847,8 @@ def run_walkforward(
             f"[WFA] fold {fold.fold}/{len(folds)} done "
             f"oos_{objective}={_fmt_float(oos_summary.get(objective))} "
             f"oos_trades={int(oos_summary.get('trades', 0))} "
-            f"oos_min_trades_met={oos_min_trades_met}",
+            f"oos_min_trades_met={oos_min_trades_met} "
+            f"wfe_{wfe_metric}={_fmt_float(wfe_pct)}%",
             flush=True,
         )
 
@@ -644,6 +875,14 @@ def run_walkforward(
         margin_rate=margin_rate,
         required_margin_abs_override=required_margin_abs,
     )
+    initial_review = build_initial_review_report(
+        equity_df=oos_equity_df,
+        trades_df=oos_trades_df,
+        aggregated_summary=agg_summary,
+        initial_equity=agg_initial,
+        commission_per_round_trip=cfg.commission_per_round_trip,
+        spread_pips=cfg.spread_pips,
+    )
 
     wf_objective = agg_summary.get(objective)
     baseline_objective = None if baseline is None else baseline["summary"].get(objective)
@@ -657,20 +896,39 @@ def run_walkforward(
         ),
     }
 
+    wfe_fail_count = int(max(0, wfe_valid_count - wfe_pass_count))
+    wfe_invalid_count = int(max(0, len(folds) - wfe_valid_count))
+    wfe_pass_rate_pct = float((wfe_pass_count / wfe_valid_count) * 100.0) if wfe_valid_count > 0 else float("nan")
+    wfe_summary = {
+        "metric": wfe_metric,
+        "min_pct": float(wfe_min_pct),
+        "valid_fold_count": int(wfe_valid_count),
+        "pass_fold_count": int(wfe_pass_count),
+        "fail_fold_count": int(wfe_fail_count),
+        "invalid_fold_count": int(wfe_invalid_count),
+        "pass_rate_pct": wfe_pass_rate_pct,
+        "all_valid_passed": bool(wfe_valid_count > 0 and wfe_pass_count == wfe_valid_count),
+    }
+
     summary = {
         "status": "ok",
         "fold_count": int(len(folds)),
         "oos_under_min_trades_count": int(oos_under_min_count),
+        "optimization_mode": optimization_mode,
+        "selection_mode": selection_mode,
         "objective": objective,
         "direction": direction,
         "aggregated_oos_summary": agg_summary,
+        "initial_review": initial_review,
         "comparison": comparison,
+        "wfe": wfe_summary,
         "baseline_included": baseline is not None,
     }
     _write_json(run_dir / "summary.json", summary)
     print(
         f"[WFA] complete aggregated_{objective}={_fmt_float(agg_summary.get(objective))} "
-        f"oos_trades={int(agg_summary.get('trades', 0))}",
+        f"oos_trades={int(agg_summary.get('trades', 0))} "
+        f"wfe_pass_rate={_fmt_float(wfe_summary.get('pass_rate_pct'))}%",
         flush=True,
     )
     return run_dir

@@ -3,7 +3,7 @@ Interactive Plotly chart for Monte Carlo run outputs.
 
 Example:
 python3 scripts/plot_monte_carlo.py \
-  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e/monte_carlo/run_15eb3ed1
+  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss/monte_carlo/run_ddmmyy_hhmmss
 """
 
 from __future__ import annotations

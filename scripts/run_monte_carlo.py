@@ -3,7 +3,7 @@ Monte Carlo simulation over walk-forward OOS trades.
 
 Example:
 python3 scripts/run_monte_carlo.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e \
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss \
   --n-sims 8000 \
   --replace \
   --ruin-equity 70000 \

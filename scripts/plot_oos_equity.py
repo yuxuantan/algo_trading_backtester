@@ -3,7 +3,7 @@ Interactive OOS equity curve plotter for walk-forward runs.
 
 Example:
 python3 scripts/plot_oos_equity.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss
 """
 
 from __future__ import annotations

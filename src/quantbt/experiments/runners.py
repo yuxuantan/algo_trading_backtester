@@ -5,7 +5,6 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import pandas as pd
 
@@ -31,14 +30,20 @@ def make_run_dir(
     variant: str | None = None,
     label: str | None = None,
 ) -> Path:
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    rid = uuid4().hex[:8]
-    run_name = f"{ts}_{_safe(label)}_{rid}" if label else f"{ts}_{rid}"
+    ts = datetime.now().strftime("%d%m%y_%H%M%S")
+    stem = f"run_{ts}_{_safe(label)}" if label else f"run_{ts}"
 
-    run_dir = Path(base) / _safe(mode) / _safe(strategy) / _safe(dataset_tag)
+    parent_dir = Path(base) / _safe(mode) / _safe(strategy) / _safe(dataset_tag)
     if variant:
-        run_dir = run_dir / _safe(variant)
-    run_dir = run_dir / run_name
+        parent_dir = parent_dir / _safe(variant)
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    run_dir = parent_dir / stem
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_dir = parent_dir / f"{stem}_{suffix:02d}"
+
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 

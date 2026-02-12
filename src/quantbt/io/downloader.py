@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 import pandas as pd
 import dukascopy_python
-from dukascopy_python.instruments import INSTRUMENT_FX_MAJORS_EUR_USD
+from dukascopy_python import instruments as dk_instruments
 
 from quantbt.io.datasets import compute_dataset_meta_from_df, write_dataset_meta
 from quantbt.io.naming import dataset_filename  # should build {symbol}_{tf}_{start}_{end}_{source}.{ext}
@@ -14,6 +15,43 @@ INTERVAL_MAP = {
     "4H": dukascopy_python.INTERVAL_HOUR_4,
     "1D": dukascopy_python.INTERVAL_DAY_1,
 }
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+
+
+@lru_cache(maxsize=1)
+def _fx_symbol_to_instrument() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for name, value in vars(dk_instruments).items():
+        if not name.startswith("INSTRUMENT_FX_"):
+            continue
+        if not isinstance(value, str):
+            continue
+        symbol = _normalize_symbol(value)
+        # Keep first if duplicates appear.
+        mapping.setdefault(symbol, value)
+    if not mapping:
+        raise RuntimeError("No INSTRUMENT_FX_* symbols found in dukascopy_python.instruments")
+    return dict(sorted(mapping.items()))
+
+
+def list_available_dukascopy_fx_symbols() -> list[str]:
+    return list(_fx_symbol_to_instrument().keys())
+
+
+def resolve_dukascopy_fx_instrument(symbol: str) -> str:
+    symbol_norm = _normalize_symbol(symbol)
+    mapping = _fx_symbol_to_instrument()
+    instrument = mapping.get(symbol_norm)
+    if instrument is None:
+        example = ", ".join(list(mapping.keys())[:20])
+        raise ValueError(
+            f"Unsupported Dukascopy FX symbol: {symbol}. "
+            f"Use one of {len(mapping)} symbols (first 20): {example}"
+        )
+    return instrument
 
 def _resolve_time_col(df: pd.DataFrame) -> str:
     candidates = [
@@ -65,19 +103,18 @@ def download_dukascopy_fx(
     Else if save_dir is provided, auto-names the file using dataset_filename(...).
     """
 
-    if symbol != "EURUSD":
-        raise NotImplementedError("Only EURUSD wired for now")
-
     if timeframe not in INTERVAL_MAP:
         raise ValueError(f"Unsupported timeframe: {timeframe}")
 
     if save_path is not None and save_dir is not None:
         raise ValueError("Provide only one of save_path or save_dir (not both).")
 
+    symbol = _normalize_symbol(symbol)
+    instrument = resolve_dukascopy_fx_instrument(symbol)
     interval = INTERVAL_MAP[timeframe]
 
     df = dukascopy_python.fetch(
-        INSTRUMENT_FX_MAJORS_EUR_USD,
+        instrument,
         interval,
         offer_side,
         start,

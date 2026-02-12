@@ -14,6 +14,39 @@ pip install -e .
 
 If you do not install editable, run scripts with `PYTHONPATH=src`.
 
+### 1.1 Streamlit Frontend (Optional)
+
+Install UI extras:
+
+```bash
+pip install -e ".[ui]"
+```
+
+Run the frontend:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+If you use the project venv, prefer:
+
+```bash
+.venv/bin/streamlit run streamlit_app.py
+```
+
+The app has four sections:
+
+- `Run Tests`: launch walk-forward, Monte Carlo, or limited tests using existing CLI scripts.
+- `Download Data`: download Dukascopy FX datasets into `data/processed` (or a custom folder).
+- `Results`: inspect saved artifacts with criteria-oriented PASS/FAIL views.
+- `Reference`: browse strategy configs and entry/exit/sizing plugin source and signatures.
+
+When runs are launched from Streamlit, interactive HTML charts are auto-generated on success:
+
+- Walk-forward: `oos_equity_interactive.html`
+- Monte Carlo: `mc_interactive.html`
+- Limited tests: `limited_interactive.html`
+
 ## 2. Download Data (Step by Step)
 
 The project includes a Dukascopy downloader CLI.
@@ -264,6 +297,11 @@ Key defaults aligned with the book workflow:
 - Full-data baseline optimization runs first (disable with `--no-baseline-full-data`).
 - Objective defaults to `return_on_account`:
   - `net_profit_abs / (max_drawdown_abs + required_margin_abs)`
+- `--optimization-mode stability_robustness` enables stability-first selection:
+  - plateau-based IS parameter pick (`--selection-mode plateau`)
+  - WFE floor (`--wfe-min-pct`, default enforced to at least 50%)
+  - minimum IS/OOS trades enforced to at least 50
+  - top-trade concentration cap (`--max-top-trade-share`, capped at 0.30)
 - If `--param-space` is empty (or all params are singletons), no optimization is run and fixed params are tested fold-by-fold.
 
 Example (anchored WFA with grid optimization):
@@ -293,6 +331,24 @@ python3 scripts/run_walkforward.py \
   --step-bars 400
 ```
 
+Example (stability-first WFA optimization):
+
+```bash
+python3 scripts/run_walkforward.py \
+  --strategy sma_cross_test_strat \
+  --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
+  --optimizer grid \
+  --optimization-mode stability_robustness \
+  --selection-mode plateau \
+  --objective return_on_account \
+  --wfe-metric total_return_% \
+  --wfe-min-pct 50 \
+  --max-top-trade-share 0.30 \
+  --is-bars 2000 \
+  --oos-bars 400 \
+  --step-bars 400
+```
+
 Key outputs:
 
 - `runs/walkforward/.../config.json`
@@ -306,7 +362,7 @@ Interactive OOS equity visualization:
 
 ```bash
 python3 scripts/plot_oos_equity.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss
 ```
 
 This writes:
@@ -330,7 +386,7 @@ Example:
 
 ```bash
 python3 scripts/run_monte_carlo.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e \
+  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss \
   --n-sims 8000 \
   --replace \
   --ruin-equity 70000 \
@@ -351,7 +407,7 @@ Interactive Monte Carlo visualization:
 
 ```bash
 python3 scripts/plot_monte_carlo.py \
-  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/20260211-191824_d32fc95e/monte_carlo/run_XXXXXXXX
+  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss/monte_carlo/run_ddmmyy_hhmmss
 ```
 
 This writes:
@@ -367,6 +423,6 @@ Includes:
 
 ## 14. Notes
 
-- The project currently wires `EURUSD` in downloader.
+- Downloader supports the FX symbols exposed as `INSTRUMENT_FX_*` by `dukascopy_python`.
 - Limited tests intentionally prioritize robustness over finding one best parameter set.
 - For internals, extension points, and module-level docs, see `docs/CODEBASE.md`.

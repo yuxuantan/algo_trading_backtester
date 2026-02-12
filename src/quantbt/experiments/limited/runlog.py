@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 
 def _safe(s: str) -> str:
@@ -25,11 +25,16 @@ def make_limited_run_dir(
     dataset_tag: str,
     test_name: str,
 ) -> Path:
-    rid = uuid4().hex[:8]
     base = Path(base) / _safe(strategy) / _safe(dataset_tag) / _safe(test_name)
     base.mkdir(parents=True, exist_ok=True)
 
-    run_dir = base / f"run_{rid}"
+    ts = datetime.now().strftime("%d%m%y_%H%M%S")
+    stem = f"run_{ts}"
+    run_dir = base / stem
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_dir = base / f"{stem}_{suffix:02d}"
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 

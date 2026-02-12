@@ -20,6 +20,11 @@ dependencies = [
   "dukascopy-python>=4.0.1",
 ]
 
+[project.optional-dependencies]
+ui = [
+  "streamlit>=1.30",
+]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

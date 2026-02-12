@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -21,7 +21,13 @@ def _write_json(path: Path, obj: dict) -> None:
 def _make_mc_run_dir(run_dir: Path) -> Path:
     base = run_dir / "monte_carlo"
     base.mkdir(parents=True, exist_ok=True)
-    out = base / f"run_{uuid4().hex[:8]}"
+    ts = datetime.now().strftime("%d%m%y_%H%M%S")
+    stem = f"run_{ts}"
+    out = base / stem
+    suffix = 1
+    while out.exists():
+        suffix += 1
+        out = base / f"{stem}_{suffix:02d}"
     out.mkdir(parents=True, exist_ok=False)
     return out
 
