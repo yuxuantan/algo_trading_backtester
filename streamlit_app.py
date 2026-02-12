@@ -1548,10 +1548,175 @@ def main() -> None:
             exit_default_name = strategy_cfg.get("exit", {}).get("name")
             sizing_default_name = strategy_cfg.get("sizing", {}).get("name")
 
+            def _strategy_default_entry_params() -> dict[str, Any]:
+                if (
+                    isinstance(strategy_cfg.get("entry", {}).get("rules"), list)
+                    and strategy_cfg.get("entry", {}).get("rules")
+                    and isinstance(strategy_cfg.get("entry", {}).get("rules")[0], dict)
+                ):
+                    return dict(strategy_cfg.get("entry", {}).get("rules", [{}])[0].get("params", {}) or {})
+                return {}
+
+            def _strategy_default_exit_params() -> dict[str, Any]:
+                return dict(strategy_cfg.get("exit", {}).get("params", {}) or {})
+
+            def _strategy_default_sizing_params() -> dict[str, Any]:
+                return dict(strategy_cfg.get("sizing", {}).get("params", {}) or {})
+
+            monkey_criteria = {
+                "mode": "all",
+                "rules": [
+                    {"metric": "total_return_%", "op": "<", "value": 16.3},
+                    {"metric": "max_drawdown_abs_%", "op": ">", "value": 11.4},
+                ],
+            }
+            similar_entry_criteria = {"total_return_%": {">": 0}}
+
+            preset_defs: dict[str, dict[str, Any]] = {
+                "Fixed ATR Exit": {
+                    "entry_plugin": "sma_cross",
+                    "entry_params": {"fast": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100], "slow": [100, 125, 150, 175, 200, 225, 250, 275, 300, 325]},
+                    "exit_plugin": "atr_brackets",
+                    "exit_params": {"rr": 2.0, "sldist_atr_mult": 1.5, "atr_period": 14},
+                    "seed_count": "",
+                    "seed_start": "",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": "",
+                    "pass_threshold": "",
+                },
+                "Fixed Bar Exit": {
+                    "entry_plugin": "sma_cross",
+                    "entry_params": {"fast": [20, 30, 40, 50, 60, 70, 80], "slow": [125, 150, 175, 200, 225, 250, 275, 300, 325, 350]},
+                    "exit_plugin": "time_exit",
+                    "exit_params": {"hold_bars": [1]},
+                    "seed_count": "",
+                    "seed_start": "",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": "",
+                    "pass_threshold": "",
+                },
+                "Similar Entry": {
+                    "entry_plugin": "donchian_breakout",
+                    "entry_params": {"lookback": [20]},
+                    "exit_plugin": "atr_brackets",
+                    "exit_params": {"rr": [1.0, 1.5, 2.0, 2.5, 3.0], "sldist_atr_mult": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0], "atr_period": 14},
+                    "seed_count": "",
+                    "seed_start": "",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": json.dumps(similar_entry_criteria, separators=(",", ":")),
+                    "pass_threshold": "",
+                },
+                "Monkey Entry": {
+                    "entry_plugin": "monkey_entry",
+                    "entry_params": {"target_entries": 132, "side": "both", "long_ratio": 0.5},
+                    "exit_plugin": default_exit,
+                    "exit_params": _strategy_default_exit_params(),
+                    "seed_count": "8000",
+                    "seed_start": "1",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
+                    "pass_threshold": "90",
+                },
+                "Monkey Exit": {
+                    "entry_plugin": default_entry,
+                    "entry_params": _strategy_default_entry_params(),
+                    "exit_plugin": "monkey_exit",
+                    "exit_params": {"avg_hold_bars": 15.75},
+                    "seed_count": "",
+                    "seed_start": "",
+                    "exit_seed_count": "8000",
+                    "exit_seed_start": "1",
+                    "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
+                    "pass_threshold": "90",
+                },
+                "Monkey Entry + Exit": {
+                    "entry_plugin": "monkey_entry",
+                    "entry_params": {"target_entries": 132, "side": "both", "long_ratio": 0.5},
+                    "exit_plugin": "monkey_exit",
+                    "exit_params": {"avg_hold_bars": 15.75},
+                    "seed_count": "8000",
+                    "seed_start": "1",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
+                    "pass_threshold": "90",
+                },
+            }
+
+            preset_label = st.selectbox("Limited test template", list(preset_defs.keys()), key="limited_test_template")
+
+            def _safe_plugin_choice(value: str, options: list[str], fallback: str) -> str:
+                return value if value in options else fallback
+
+            def _as_json_or_blank(value: Any) -> str:
+                if value is None:
+                    return ""
+                if isinstance(value, str):
+                    return value
+                return _json_pretty(value)
+
+            def _apply_limited_template(label: str) -> None:
+                tpl = preset_defs[label]
+                entry_choice = _safe_plugin_choice(str(tpl.get("entry_plugin", default_entry)), [default_entry, *entry_plugins], default_entry)
+                exit_choice = _safe_plugin_choice(str(tpl.get("exit_plugin", default_exit)), [default_exit, *exit_plugins], default_exit)
+                sizing_choice = _safe_plugin_choice(
+                    str(tpl.get("sizing_plugin", default_sizing)),
+                    [default_sizing, *sizing_plugins],
+                    default_sizing,
+                )
+
+                st.session_state["limited_entry_plugin_select"] = entry_choice
+                st.session_state["limited_exit_plugin_select"] = exit_choice
+                st.session_state["limited_sizing_plugin_select"] = sizing_choice
+                st.session_state["limited_entry_params_json"] = _as_json_or_blank(tpl.get("entry_params"))
+                st.session_state["limited_exit_params_json"] = _as_json_or_blank(tpl.get("exit_params"))
+                st.session_state["limited_sizing_params_json"] = _as_json_or_blank(
+                    tpl.get("sizing_params", _strategy_default_sizing_params())
+                )
+                st.session_state["limited_seed_count"] = str(tpl.get("seed_count", ""))
+                st.session_state["limited_seed_start"] = str(tpl.get("seed_start", ""))
+                st.session_state["limited_exit_seed_count"] = str(tpl.get("exit_seed_count", ""))
+                st.session_state["limited_exit_seed_start"] = str(tpl.get("exit_seed_start", ""))
+                st.session_state["limited_favourable_criteria"] = str(tpl.get("favourable_criteria", ""))
+                st.session_state["limited_pass_threshold"] = str(tpl.get("pass_threshold", ""))
+                st.session_state.setdefault("limited_commission_rt", "5")
+
+            preset_track_key = "_limited_last_applied_template"
+            strategy_track_key = "_limited_last_template_strategy"
+            template_changed = st.session_state.get(preset_track_key) != preset_label
+            strategy_changed = st.session_state.get(strategy_track_key) != strategy_short
+            if template_changed or strategy_changed:
+                _apply_limited_template(preset_label)
+                st.session_state[preset_track_key] = preset_label
+                st.session_state[strategy_track_key] = strategy_short
+
+            st.session_state.setdefault("limited_entry_plugin_select", default_entry)
+            st.session_state.setdefault("limited_exit_plugin_select", default_exit)
+            st.session_state.setdefault("limited_sizing_plugin_select", default_sizing)
+            st.session_state.setdefault("limited_entry_params_json", _json_pretty(_strategy_default_entry_params()))
+            st.session_state.setdefault("limited_exit_params_json", _json_pretty(_strategy_default_exit_params()))
+            st.session_state.setdefault("limited_sizing_params_json", _json_pretty(_strategy_default_sizing_params()))
+            st.session_state.setdefault("limited_run_base", "")
+            st.session_state.setdefault("limited_test_name", "")
+            st.session_state.setdefault("limited_progress_every", 10)
+            st.session_state.setdefault("limited_commission_rt", "5")
+            st.session_state.setdefault("limited_pass_threshold", "")
+            st.session_state.setdefault("limited_min_trades", "")
+            st.session_state.setdefault("limited_favourable_criteria", "")
+            st.session_state.setdefault("limited_extra_args", "")
+            st.session_state.setdefault("limited_seed_count", "")
+            st.session_state.setdefault("limited_seed_start", "")
+            st.session_state.setdefault("limited_exit_seed_count", "")
+            st.session_state.setdefault("limited_exit_seed_start", "")
+
             c1, c2, c3 = st.columns(3)
-            entry_plugin = c1.selectbox("Entry plugin", [default_entry, *entry_plugins])
-            exit_plugin = c2.selectbox("Exit plugin", [default_exit, *exit_plugins])
-            sizing_plugin = c3.selectbox("Sizing plugin", [default_sizing, *sizing_plugins])
+            entry_plugin = c1.selectbox("Entry plugin", [default_entry, *entry_plugins], key="limited_entry_plugin_select")
+            exit_plugin = c2.selectbox("Exit plugin", [default_exit, *exit_plugins], key="limited_exit_plugin_select")
+            sizing_plugin = c3.selectbox("Sizing plugin", [default_sizing, *sizing_plugins], key="limited_sizing_plugin_select")
 
             selected_entry_name = entry_default_name if entry_plugin == default_entry else entry_plugin
             selected_exit_name = exit_default_name if exit_plugin == default_exit else exit_plugin
@@ -1565,69 +1730,31 @@ def main() -> None:
             if selected_sizing_name:
                 link_cols[2].markdown(_reference_link("View sizing plugin", "sizing", str(selected_sizing_name)))
 
-            entry_params_default = {}
-            exit_params_default = {}
-            sizing_params_default = {}
-
-            if selected_entry_name:
-                if selected_entry_name == entry_default_name:
-                    entry_params_default = (
-                        strategy_cfg.get("entry", {}).get("rules", [{}])[0].get("params", {})
-                        if isinstance(strategy_cfg.get("entry", {}).get("rules"), list)
-                        else {}
-                    )
-                entry_params_default = {**DEFAULT_ENTRY_PARAMS.get(selected_entry_name, {}), **entry_params_default}
-
-            if selected_exit_name:
-                if selected_exit_name == exit_default_name:
-                    exit_params_default = strategy_cfg.get("exit", {}).get("params", {})
-                exit_params_default = {**DEFAULT_EXIT_PARAMS.get(selected_exit_name, {}), **exit_params_default}
-
-            if selected_sizing_name:
-                if selected_sizing_name == sizing_default_name:
-                    sizing_params_default = strategy_cfg.get("sizing", {}).get("params", {})
-                sizing_params_default = {**DEFAULT_SIZING_PARAMS.get(selected_sizing_name, {}), **sizing_params_default}
-
             c4, c5 = st.columns(2)
-            entry_params = c4.text_area(
-                "Entry params JSON",
-                value=_json_pretty(entry_params_default),
-                height=140,
-                key=f"limited_entry_params_{strategy_short}_{selected_entry_name}",
-            )
-            exit_params = c5.text_area(
-                "Exit params JSON",
-                value=_json_pretty(exit_params_default),
-                height=140,
-                key=f"limited_exit_params_{strategy_short}_{selected_exit_name}",
-            )
+            entry_params = c4.text_area("Entry params JSON", height=140, key="limited_entry_params_json")
+            exit_params = c5.text_area("Exit params JSON", height=140, key="limited_exit_params_json")
 
-            sizing_params = st.text_area(
-                "Sizing params JSON",
-                value=_json_pretty(sizing_params_default),
-                height=110,
-                key=f"limited_sizing_params_{strategy_short}_{selected_sizing_name}",
-            )
+            sizing_params = st.text_area("Sizing params JSON", height=110, key="limited_sizing_params_json")
 
             c6, c7, c8 = st.columns(3)
-            run_base = c6.text_input("Run base (optional)", value="")
-            test_name = c7.text_input("Test name (optional)", value="")
-            progress_every = int(c8.number_input("Progress every", min_value=1, value=10, step=1, key="limited_progress_every"))
+            run_base = c6.text_input("Run base (optional)", key="limited_run_base")
+            test_name = c7.text_input("Test name (optional)", key="limited_test_name")
+            progress_every = int(c8.number_input("Progress every", min_value=1, step=1, key="limited_progress_every"))
 
             c9, c10, c11 = st.columns(3)
-            commission_rt = c9.text_input("Commission RT (optional)", value="5")
-            pass_threshold = c10.text_input("Pass threshold % (optional)", value="")
-            min_trades = c11.text_input("Min trades (optional)", value="")
+            commission_rt = c9.text_input("Commission RT (optional)", key="limited_commission_rt")
+            pass_threshold = c10.text_input("Pass threshold % (optional)", key="limited_pass_threshold")
+            min_trades = c11.text_input("Min trades (optional)", key="limited_min_trades")
 
             c12, c13 = st.columns(2)
-            favourable_criteria = c12.text_input("Favourable criteria JSON (optional)", value="")
-            extra_args = c13.text_input("Extra args (optional)", value="", key="limited_extra_args")
+            favourable_criteria = c12.text_input("Favourable criteria JSON (optional)", key="limited_favourable_criteria")
+            extra_args = c13.text_input("Extra args (optional)", key="limited_extra_args")
 
             c14, c15, c16, c17 = st.columns(4)
-            seed_count = c14.text_input("Seed count (optional)", value="")
-            seed_start = c15.text_input("Seed start (optional)", value="")
-            exit_seed_count = c16.text_input("Exit seed count (optional)", value="")
-            exit_seed_start = c17.text_input("Exit seed start (optional)", value="")
+            seed_count = c14.text_input("Seed count (optional)", key="limited_seed_count")
+            seed_start = c15.text_input("Seed start (optional)", key="limited_seed_start")
+            exit_seed_count = c16.text_input("Exit seed count (optional)", key="limited_exit_seed_count")
+            exit_seed_start = c17.text_input("Exit seed start (optional)", key="limited_exit_seed_start")
 
             if st.button("Run limited tests", type="primary"):
                 try:
