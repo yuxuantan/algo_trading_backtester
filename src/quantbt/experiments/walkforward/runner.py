@@ -152,12 +152,20 @@ def evaluate_on_slice(
         if len(df_sig) < 2:
             return None
 
-        equity_df, trades_df, summary = run_backtest_sma_cross(
-            df_sig,
-            build_brackets_fn=strategy_mod.build_brackets_from_signal,
-            strategy_params=sp,
-            cfg=cfg,
-        )
+        custom_backtest = getattr(strategy_mod, "run_backtest", None)
+        if callable(custom_backtest):
+            equity_df, trades_df, summary = custom_backtest(
+                df_sig,
+                strategy_params=sp,
+                cfg=cfg,
+            )
+        else:
+            equity_df, trades_df, summary = run_backtest_sma_cross(
+                df_sig,
+                build_brackets_fn=strategy_mod.build_brackets_from_signal,
+                strategy_params=sp,
+                cfg=cfg,
+            )
     except Exception:
         return None
 

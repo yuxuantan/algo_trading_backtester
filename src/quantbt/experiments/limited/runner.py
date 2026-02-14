@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from pathlib import Path
 
@@ -83,6 +84,7 @@ def run_spec(spec: dict, *, progress_every: int = 10):
     signals_cache: dict[tuple, pd.DataFrame] = {}
 
     rows = []
+    trade_rows: list[pd.DataFrame] = []
     total = total_iterations(entry_variants, exit_param_space)
 
     start_ts = time.time()
@@ -122,6 +124,13 @@ def run_spec(spec: dict, *, progress_every: int = 10):
                 size_fn=size_fn,
             )
 
+            if _trades is not None and not _trades.empty:
+                tdf = _trades.copy()
+                tdf["iter"] = iter_count
+                tdf["entry_params"] = json.dumps([r["params"] for r in entry_combo], default=str)
+                tdf["exit_params"] = json.dumps(exit_params, default=str)
+                trade_rows.append(tdf)
+
             ok = summary.get("trades", 0) >= min_trades and criteria_pass(summary, criteria)
             if ok:
                 pass_count += 1
@@ -141,6 +150,9 @@ def run_spec(spec: dict, *, progress_every: int = 10):
 
     res_df = pd.DataFrame(rows)
     res_df.to_csv(run_dir / "limited_results.csv", index=False)
+    if trade_rows:
+        trades_df = pd.concat(trade_rows, ignore_index=True)
+        trades_df.to_csv(run_dir / "limited_trades.csv", index=False)
 
     pass_rate = limited_test_pass_rate(res_df)
     pass_summary = {
@@ -154,3 +166,5 @@ def run_spec(spec: dict, *, progress_every: int = 10):
 
     print(f"Favourable%: {pass_rate:.1f}% -> {'PASS' if pass_rate >= pass_threshold else 'FAIL'}")
     print(f"Saved: {run_dir}/limited_results.csv")
+    if trade_rows:
+        print(f"Saved: {run_dir}/limited_trades.csv")

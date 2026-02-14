@@ -54,11 +54,13 @@ def load_default_plugins() -> None:
     from quantbt.plugins.entries import sma_cross  # noqa: F401
     from quantbt.plugins.entries import random_entry  # noqa: F401
     from quantbt.plugins.entries import donchian_breakout  # noqa: F401
+    from quantbt.plugins.entries import interequity_liqsweep_entry  # noqa: F401
 
     # Exits
     from quantbt.plugins.exits import atr_brackets  # noqa: F401
     from quantbt.plugins.exits import time_exit  # noqa: F401
     from quantbt.plugins.exits import random_time_exit  # noqa: F401
+    from quantbt.plugins.exits import interequity_liqsweep_exit  # noqa: F401
 
     # Sizing
     from quantbt.plugins.sizing import fixed_risk  # noqa: F401

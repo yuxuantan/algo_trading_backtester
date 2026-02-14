@@ -8,12 +8,12 @@
 //    - Uses 3 line states:
 //      - BLACK: normal pivot level
 //      - PURPLE: pivot formed after same-side sweep context
-//      - RED: confirmed pattern after paired pivots + BOS confirmation
+//      - RED: confirmed when paired pivots are followed by >3 ATR move-away
 //
 // 2) RED level creation logic:
 //    - Pairs nearby pivots (within ATR-based tolerance).
-//    - Waits for BOS-style confirmation (close through opposite reference pivot).
-//    - On confirmation, both paired levels are promoted to RED.
+//    - When price moves away from the paired liquidity zone by >3 ATR,
+//      both paired levels are promoted to RED.
 //
 // 3) Entry trigger logic (LTF only):
 //    - SHORT trigger when price sweeps an active RED LTF high.
@@ -29,13 +29,16 @@
 //      entry price and stop-loss (across all LTF/HTF high/low pools).
 //    - Take-profit is the nearest HTF RED level in trade direction.
 //    - Trade is only allowed when reward:risk is within configured min/max.
+//    - Force-exit if nearest active line above price is PURPLE while long,
+//      or nearest active line below price is PURPLE while short.
+//    - For force-exit scan, BLACK lines are ignored.
 //    - Position size uses fixed risk: 1% of initial capital / stop distance.
 //
 // 5) Visualization/runtime management:
 //    - Keeps separate line pools for LTF/HTF highs and lows.
 //    - Trims old lines to stay within TradingView max line limits.
 //    - Stops extending levels once they are breached.
-//    - Draws TP (green) and SL (red) boxes from entry until trade close.
+//    - Draws TP (green) and SL (blue) boxes from entry until trade close.
 // -----------------------------------------------------------------------------
 strategy("LTF Liquidity Sweep Strategy (with HTF lines kept)", overlay=true,
      initial_capital=100000,
@@ -55,6 +58,7 @@ const int   LTF_PIVOT_LEN  = 3
 const int   HTF_PIVOT_LEN  = 3
 const int   ATR_LEN    = 14
 const float SL_BUFFER_PIPS = 1.0
+const float LIQ_MOVE_AWAY_ATR = 3.0
 
 // Total line budget = 500 across ALL lines drawn.
 // Split across 4 pools (LTF H/L + HTF H/L) => 150+150+100+100 = 500
@@ -132,6 +136,110 @@ f_any_red_between(float p1, float p2,
                     break
 
     found
+
+// Find state of nearest ACTIVE NON-BLACK line ABOVE price across LTF/HTF high/low pools.
+// Returns -1 when no active non-black line above exists.
+f_next_state_above(float price,
+                   float[] ltfH_lvls, bool[] ltfH_drawnAct, int[] ltfH_state,
+                   float[] ltfL_lvls, bool[] ltfL_drawnAct, int[] ltfL_state,
+                   float[] htfH_lvls, bool[] htfH_drawnAct, int[] htfH_state,
+                   float[] htfL_lvls, bool[] htfL_drawnAct, int[] htfL_state) =>
+    float bestLvl = na
+    int bestState = -1
+
+    int n1 = array.size(ltfH_lvls)
+    if n1 > 0
+        for i = 0 to n1 - 1
+            if array.get(ltfH_drawnAct, i)
+                float lvl = array.get(ltfH_lvls, i)
+                int st = array.get(ltfH_state, i)
+                if st != ST_BLACK and lvl > price and (na(bestLvl) or lvl < bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n2 = array.size(ltfL_lvls)
+    if n2 > 0
+        for i = 0 to n2 - 1
+            if array.get(ltfL_drawnAct, i)
+                float lvl = array.get(ltfL_lvls, i)
+                int st = array.get(ltfL_state, i)
+                if st != ST_BLACK and lvl > price and (na(bestLvl) or lvl < bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n3 = array.size(htfH_lvls)
+    if n3 > 0
+        for i = 0 to n3 - 1
+            if array.get(htfH_drawnAct, i)
+                float lvl = array.get(htfH_lvls, i)
+                int st = array.get(htfH_state, i)
+                if st != ST_BLACK and lvl > price and (na(bestLvl) or lvl < bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n4 = array.size(htfL_lvls)
+    if n4 > 0
+        for i = 0 to n4 - 1
+            if array.get(htfL_drawnAct, i)
+                float lvl = array.get(htfL_lvls, i)
+                int st = array.get(htfL_state, i)
+                if st != ST_BLACK and lvl > price and (na(bestLvl) or lvl < bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    bestState
+
+// Find state of nearest ACTIVE NON-BLACK line BELOW price across LTF/HTF high/low pools.
+// Returns -1 when no active non-black line below exists.
+f_next_state_below(float price,
+                   float[] ltfH_lvls, bool[] ltfH_drawnAct, int[] ltfH_state,
+                   float[] ltfL_lvls, bool[] ltfL_drawnAct, int[] ltfL_state,
+                   float[] htfH_lvls, bool[] htfH_drawnAct, int[] htfH_state,
+                   float[] htfL_lvls, bool[] htfL_drawnAct, int[] htfL_state) =>
+    float bestLvl = na
+    int bestState = -1
+
+    int n1 = array.size(ltfH_lvls)
+    if n1 > 0
+        for i = 0 to n1 - 1
+            if array.get(ltfH_drawnAct, i)
+                float lvl = array.get(ltfH_lvls, i)
+                int st = array.get(ltfH_state, i)
+                if st != ST_BLACK and lvl < price and (na(bestLvl) or lvl > bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n2 = array.size(ltfL_lvls)
+    if n2 > 0
+        for i = 0 to n2 - 1
+            if array.get(ltfL_drawnAct, i)
+                float lvl = array.get(ltfL_lvls, i)
+                int st = array.get(ltfL_state, i)
+                if st != ST_BLACK and lvl < price and (na(bestLvl) or lvl > bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n3 = array.size(htfH_lvls)
+    if n3 > 0
+        for i = 0 to n3 - 1
+            if array.get(htfH_drawnAct, i)
+                float lvl = array.get(htfH_lvls, i)
+                int st = array.get(htfH_state, i)
+                if st != ST_BLACK and lvl < price and (na(bestLvl) or lvl > bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    int n4 = array.size(htfL_lvls)
+    if n4 > 0
+        for i = 0 to n4 - 1
+            if array.get(htfL_drawnAct, i)
+                float lvl = array.get(htfL_lvls, i)
+                int st = array.get(htfL_state, i)
+                if st != ST_BLACK and lvl < price and (na(bestLvl) or lvl > bestLvl)
+                    bestLvl := lvl
+                    bestState := st
+
+    bestState
 
 // Find next HTF PURPLE high ABOVE price (nearest). Returns na if none.
 f_next_htf_purple_high_above(float price, float[] htfH_lvls, bool[] htfH_drawnAct, int[] htfH_state) =>
@@ -212,14 +320,6 @@ ltfPL  = ta.pivotlow(low,  LTF_PIVOT_LEN, LTF_PIVOT_LEN)
 ltfPivotTime = time[LTF_PIVOT_LEN]
 ltfPivotATR  = ltfATR[LTF_PIVOT_LEN]
 
-// Structure refs for BOS capture (stable at pair creation)
-var float ltfLastPivotHigh = na
-var float ltfLastPivotLow  = na
-if not na(ltfPH)
-    ltfLastPivotHigh := ltfPH
-if not na(ltfPL)
-    ltfLastPivotLow  := ltfPL
-
 //----------------------------
 // LTF High storage
 //----------------------------
@@ -232,7 +332,7 @@ var int[]   ltfH_state      = array.new_int()
 
 var int[]   ltfH_pendA      = array.new_int()
 var int[]   ltfH_pendB      = array.new_int()
-var float[] ltfH_pendRefLow = array.new_float()
+var float[] ltfH_pendTriggerDown = array.new_float()
 var bool[]  ltfH_pendOk     = array.new_bool()
 
 ltfH_trim() =>
@@ -257,7 +357,7 @@ ltfH_trim() =>
                 if a == 0 or b == 0
                     array.remove(ltfH_pendA, k)
                     array.remove(ltfH_pendB, k)
-                    array.remove(ltfH_pendRefLow, k)
+                    array.remove(ltfH_pendTriggerDown, k)
                     array.remove(ltfH_pendOk, k)
                 else
                     array.set(ltfH_pendA, k, a - 1)
@@ -276,7 +376,7 @@ var int[]   ltfL_state      = array.new_int()
 
 var int[]   ltfL_pendA       = array.new_int()
 var int[]   ltfL_pendB       = array.new_int()
-var float[] ltfL_pendRefHigh = array.new_float()
+var float[] ltfL_pendTriggerUp = array.new_float()
 var bool[]  ltfL_pendOk      = array.new_bool()
 
 ltfL_trim() =>
@@ -301,7 +401,7 @@ ltfL_trim() =>
                 if a == 0 or b == 0
                     array.remove(ltfL_pendA, k)
                     array.remove(ltfL_pendB, k)
-                    array.remove(ltfL_pendRefHigh, k)
+                    array.remove(ltfL_pendTriggerUp, k)
                     array.remove(ltfL_pendOk, k)
                 else
                     array.set(ltfL_pendA, k, a - 1)
@@ -348,6 +448,7 @@ if showLTF and not na(ltfPH)
                 break
 
     int match = na
+    float matchLvl = na
     int n = array.size(ltfH_lvls)
     if n > 0
         for j = n - 1 to 0
@@ -355,6 +456,7 @@ if showLTF and not na(ltfPH)
                 float prev = array.get(ltfH_lvls, j)
                 if math.abs(ltfPH - prev) <= (atrDistForLiqGeneration * pATR) and ltfPH <= prev
                     match := j
+                    matchLvl := prev
                     break
 
     int baseState = sweptEarlier ? ST_PURPLE : ST_BLACK
@@ -370,10 +472,12 @@ if showLTF and not na(ltfPH)
     array.push(ltfH_drawnAct, true)
     array.push(ltfH_state, baseState)
 
-    if not na(match) and not na(ltfLastPivotLow)
+    if not na(match)
         array.push(ltfH_pendA, match)
         array.push(ltfH_pendB, currIdx)
-        array.push(ltfH_pendRefLow, ltfLastPivotLow)
+        float pairHigh = math.max(ltfPH, matchLvl)
+        float triggerDown = pairHigh - (LIQ_MOVE_AWAY_ATR * pATR)
+        array.push(ltfH_pendTriggerDown, triggerDown)
         array.push(ltfH_pendOk, false)
 
     _ = ltfH_trim()
@@ -395,6 +499,7 @@ if showLTF and not na(ltfPL)
                 break
 
     int match = na
+    float matchLvl = na
     int n = array.size(ltfL_lvls)
     if n > 0
         for j = n - 1 to 0
@@ -402,6 +507,7 @@ if showLTF and not na(ltfPL)
                 float prev = array.get(ltfL_lvls, j)
                 if math.abs(ltfPL - prev) <= (atrDistForLiqGeneration * pATR) and ltfPL >= prev
                     match := j
+                    matchLvl := prev
                     break
 
     int baseState = sweptEarlier ? ST_PURPLE : ST_BLACK
@@ -417,25 +523,27 @@ if showLTF and not na(ltfPL)
     array.push(ltfL_drawnAct, true)
     array.push(ltfL_state, baseState)
 
-    if not na(match) and not na(ltfLastPivotHigh)
+    if not na(match)
         array.push(ltfL_pendA, match)
         array.push(ltfL_pendB, currIdx)
-        array.push(ltfL_pendRefHigh, ltfLastPivotHigh)
+        float pairLow = math.min(ltfPL, matchLvl)
+        float triggerUp = pairLow + (LIQ_MOVE_AWAY_ATR * pATR)
+        array.push(ltfL_pendTriggerUp, triggerUp)
         array.push(ltfL_pendOk, false)
 
     _ = ltfL_trim()
 
 
 //============================
-// LTF: BOS confirmations -> RED (updates state arrays too)
+// LTF: move-away confirmations -> RED (updates state arrays too)
 //============================
 if showLTF
     int pnH = array.size(ltfH_pendA)
     if pnH > 0
         for k = 0 to pnH - 1
             if not array.get(ltfH_pendOk, k)
-                float ref = array.get(ltfH_pendRefLow, k)
-                if close < ref
+                float triggerDown = array.get(ltfH_pendTriggerDown, k)
+                if close <= triggerDown
                     int a = array.get(ltfH_pendA, k)
                     int b = array.get(ltfH_pendB, k)
                     if f_both_active(ltfH_act, a, b)
@@ -450,8 +558,8 @@ if showLTF
     if pnL > 0
         for k = 0 to pnL - 1
             if not array.get(ltfL_pendOk, k)
-                float ref = array.get(ltfL_pendRefHigh, k)
-                if close > ref
+                float triggerUp = array.get(ltfL_pendTriggerUp, k)
+                if close >= triggerUp
                     int a = array.get(ltfL_pendA, k)
                     int b = array.get(ltfL_pendB, k)
                     if f_both_active(ltfL_act, a, b)
@@ -519,10 +627,6 @@ htfPivotATR  = request.security(syminfo.tickerid, htf, ta.atr(ATR_LEN)[HTF_PIVOT
 
 newHTFBar = htfTime != htfTime[1]
 
-// Structure refs for BOS capture
-var float htfLastPivotHigh = na
-var float htfLastPivotLow  = na
-
 // HTF High storage
 var line[]  htfH_lines      = array.new_line()
 var float[] htfH_lvls       = array.new_float()
@@ -533,7 +637,7 @@ var int[]   htfH_state      = array.new_int()
 
 var int[]   htfH_pendA      = array.new_int()
 var int[]   htfH_pendB      = array.new_int()
-var float[] htfH_pendRefLow = array.new_float()
+var float[] htfH_pendTriggerDown = array.new_float()
 var bool[]  htfH_pendOk     = array.new_bool()
 
 htfH_trim() =>
@@ -557,7 +661,7 @@ htfH_trim() =>
                 if a == 0 or b == 0
                     array.remove(htfH_pendA, k)
                     array.remove(htfH_pendB, k)
-                    array.remove(htfH_pendRefLow, k)
+                    array.remove(htfH_pendTriggerDown, k)
                     array.remove(htfH_pendOk, k)
                 else
                     array.set(htfH_pendA, k, a - 1)
@@ -574,7 +678,7 @@ var int[]   htfL_state      = array.new_int()
 
 var int[]   htfL_pendA       = array.new_int()
 var int[]   htfL_pendB       = array.new_int()
-var float[] htfL_pendRefHigh = array.new_float()
+var float[] htfL_pendTriggerUp = array.new_float()
 var bool[]  htfL_pendOk      = array.new_bool()
 
 htfL_trim() =>
@@ -598,7 +702,7 @@ htfL_trim() =>
                 if a == 0 or b == 0
                     array.remove(htfL_pendA, k)
                     array.remove(htfL_pendB, k)
-                    array.remove(htfL_pendRefHigh, k)
+                    array.remove(htfL_pendTriggerUp, k)
                     array.remove(htfL_pendOk, k)
                 else
                     array.set(htfL_pendA, k, a - 1)
@@ -610,11 +714,6 @@ htfL_trim() =>
 // HTF update block
 //============================
 if showHTF and newHTFBar
-    if not na(htfPH)
-        htfLastPivotHigh := htfPH
-    if not na(htfPL)
-        htfLastPivotLow  := htfPL
-
     // breach tracking for purple detection (HTF side)
     int nH = array.size(htfH_lvls)
     if nH > 0
@@ -648,6 +747,7 @@ if showHTF and newHTFBar
                     break
 
         int match = na
+        float matchLvl = na
         int n = array.size(htfH_lvls)
         if n > 0
             for j = n - 1 to 0
@@ -655,6 +755,7 @@ if showHTF and newHTFBar
                     float prev = array.get(htfH_lvls, j)
                     if math.abs(htfPH - prev) <= (atrDistForLiqGeneration * pATR) and htfPH <= prev
                         match := j
+                        matchLvl := prev
                         break
 
         int baseState = sweptEarlier ? ST_PURPLE : ST_BLACK
@@ -670,10 +771,12 @@ if showHTF and newHTFBar
         array.push(htfH_drawnAct, true)
         array.push(htfH_state, baseState)
 
-        if not na(match) and not na(htfLastPivotLow)
+        if not na(match)
             array.push(htfH_pendA, match)
             array.push(htfH_pendB, currIdx)
-            array.push(htfH_pendRefLow, htfLastPivotLow)
+            float pairHigh = math.max(htfPH, matchLvl)
+            float triggerDown = pairHigh - (LIQ_MOVE_AWAY_ATR * pATR)
+            array.push(htfH_pendTriggerDown, triggerDown)
             array.push(htfH_pendOk, false)
 
         _ = htfH_trim()
@@ -692,6 +795,7 @@ if showHTF and newHTFBar
                     break
 
         int match = na
+        float matchLvl = na
         int n = array.size(htfL_lvls)
         if n > 0
             for j = n - 1 to 0
@@ -699,6 +803,7 @@ if showHTF and newHTFBar
                     float prev = array.get(htfL_lvls, j)
                     if math.abs(htfPL - prev) <= (atrDistForLiqGeneration * pATR) and htfPL >= prev
                         match := j
+                        matchLvl := prev
                         break
 
         int baseState = sweptEarlier ? ST_PURPLE : ST_BLACK
@@ -714,21 +819,23 @@ if showHTF and newHTFBar
         array.push(htfL_drawnAct, true)
         array.push(htfL_state, baseState)
 
-        if not na(match) and not na(htfLastPivotHigh)
+        if not na(match)
             array.push(htfL_pendA, match)
             array.push(htfL_pendB, currIdx)
-            array.push(htfL_pendRefHigh, htfLastPivotHigh)
+            float pairLow = math.min(htfPL, matchLvl)
+            float triggerUp = pairLow + (LIQ_MOVE_AWAY_ATR * pATR)
+            array.push(htfL_pendTriggerUp, triggerUp)
             array.push(htfL_pendOk, false)
 
         _ = htfL_trim()
 
-    // HTF BOS confirmations -> RED (also updates state arrays)
+    // HTF move-away confirmations -> RED (also updates state arrays)
     int pnHH = array.size(htfH_pendA)
     if pnHH > 0
         for k = 0 to pnHH - 1
             if not array.get(htfH_pendOk, k)
-                float ref = array.get(htfH_pendRefLow, k)
-                if htfClose < ref
+                float triggerDown = array.get(htfH_pendTriggerDown, k)
+                if htfClose <= triggerDown
                     int a = array.get(htfH_pendA, k)
                     int b = array.get(htfH_pendB, k)
                     if f_both_active(htfH_act, a, b)
@@ -743,8 +850,8 @@ if showHTF and newHTFBar
     if pnLL > 0
         for k = 0 to pnLL - 1
             if not array.get(htfL_pendOk, k)
-                float ref = array.get(htfL_pendRefHigh, k)
-                if htfClose > ref
+                float triggerUp = array.get(htfL_pendTriggerUp, k)
+                if htfClose >= triggerUp
                     int a = array.get(htfL_pendA, k)
                     int b = array.get(htfL_pendB, k)
                     if f_both_active(htfL_act, a, b)
@@ -788,6 +895,7 @@ if showHTF
 // TP: next HTF RED line in TP direction (below for shorts, above for longs)
 // Constraint: reward:risk must be > minRR and <= maxRR
 // SL uses +1 pip buffer beyond structural stop.
+// Force-exit: if nearest line above (long) / below (short) is PURPLE.
 // Risk sizing: 1% of initial capital
 //====================================================================
 bool flat = strategy.position_size == 0
@@ -861,6 +969,25 @@ if flat and trigLong
         pendingTP := tp
         pendingVisual := true
 
+// Directional force-exit when nearest line in trade direction is PURPLE.
+if strategy.position_size > 0
+    int nextStateAbove = f_next_state_above(close,
+         ltfH_lvls, ltfH_drawnAct, ltfH_state,
+         ltfL_lvls, ltfL_drawnAct, ltfL_state,
+         htfH_lvls, htfH_drawnAct, htfH_state,
+         htfL_lvls, htfL_drawnAct, htfL_state)
+    if nextStateAbove == ST_PURPLE
+        strategy.close("L", comment="Nearest above is purple")
+
+if strategy.position_size < 0
+    int nextStateBelow = f_next_state_below(close,
+         ltfH_lvls, ltfH_drawnAct, ltfH_state,
+         ltfL_lvls, ltfL_drawnAct, ltfL_state,
+         htfH_lvls, htfH_drawnAct, htfH_state,
+         htfL_lvls, htfL_drawnAct, htfL_state)
+    if nextStateBelow == ST_PURPLE
+        strategy.close("S", comment="Nearest below is purple")
+
 // Trade visual boxes: create on position open, extend while open, freeze on close.
 bool openedPos = strategy.position_size != 0 and strategy.position_size[1] == 0
 bool closedPos = strategy.position_size == 0 and strategy.position_size[1] != 0
@@ -885,8 +1012,8 @@ if openedPos and pendingVisual and not na(pendingSL) and not na(pendingTP)
          top=slTop,
          right=bar_index + 1,
          bottom=slBottom,
-         border_color=color.new(color.red, 0),
-         bgcolor=color.new(color.red, 85),
+         border_color=color.new(color.blue, 0),
+         bgcolor=color.new(color.blue, 85),
          xloc=xloc.bar_index)
     pendingVisual := false
 

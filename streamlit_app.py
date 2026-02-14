@@ -1011,6 +1011,7 @@ def _render_mc_results(mc_run_dir: Path) -> None:
 
 def _render_limited_results(run_dir: Path) -> None:
     results_path = run_dir / "limited_results.csv"
+    trades_path = run_dir / "limited_trades.csv"
     pass_path = run_dir / "pass_summary.json"
     meta_path = run_dir / "run_meta.json"
 
@@ -1093,8 +1094,90 @@ def _render_limited_results(run_dir: Path) -> None:
     if "max_drawdown_abs_%" in results.columns:
         _render_histogram(results["max_drawdown_abs_%"], title="max_drawdown_abs_% distribution", bins=60)
 
-    top_cols = [c for c in ["iter", "trades", "total_return_%", "max_drawdown_abs_%", "favourable"] if c in results.columns]
-    st.dataframe(results[top_cols] if top_cols else results, use_container_width=True)
+    st.subheader("Iterations")
+    iter_cols = [
+        c
+        for c in [
+            "iter",
+            "favourable",
+            "trades",
+            "total_return_%",
+            "max_drawdown_abs_%",
+            "profit_factor",
+            "win_rate_%",
+            "entry_params",
+            "exit_params",
+        ]
+        if c in results.columns
+    ]
+    st.dataframe(results[iter_cols] if iter_cols else results, use_container_width=True)
+
+    if trades_path.exists():
+        trades = pd.read_csv(trades_path)
+        st.subheader("Iteration Trade Drill-Down")
+        if "iter" in trades.columns and "iter" in results.columns:
+            iter_values = pd.to_numeric(results["iter"], errors="coerce").dropna().astype(int).tolist()
+            iter_values = sorted(set(iter_values))
+            if iter_values:
+                default_iter = iter_values[0]
+                selected_iter = st.selectbox(
+                    "Select iteration",
+                    iter_values,
+                    index=iter_values.index(default_iter),
+                    key=f"limited_selected_iter_{run_dir.as_posix()}",
+                )
+
+                row = results.loc[pd.to_numeric(results["iter"], errors="coerce") == int(selected_iter)]
+                if not row.empty:
+                    r = row.iloc[0]
+                    trades_n = pd.to_numeric(pd.Series([r.get("trades", 0)]), errors="coerce").iloc[0]
+                    trades_n = 0 if pd.isna(trades_n) else int(trades_n)
+                    _render_metric_row(
+                        [
+                            ("Iter", int(selected_iter), "{:d}"),
+                            ("Favourable", _status_label(bool(r.get("favourable", False))), "{}"),
+                            ("Trades", trades_n, "{:d}"),
+                            ("Return %", float(r.get("total_return_%", float("nan"))), "{:.2f}"),
+                            ("Max DD %", float(r.get("max_drawdown_abs_%", float("nan"))), "{:.2f}"),
+                        ]
+                    )
+
+                trades_iter = trades.loc[pd.to_numeric(trades["iter"], errors="coerce") == int(selected_iter)].copy()
+                if trades_iter.empty:
+                    st.info("No trades recorded for this iteration.")
+                else:
+                    trade_cols = [
+                        c
+                        for c in [
+                            "entry_time",
+                            "exit_time",
+                            "side",
+                            "entry",
+                            "exit",
+                            "exit_reason",
+                            "units",
+                            "pnl",
+                            "r_multiple",
+                            "bars_held",
+                            "commission",
+                            "mfe",
+                            "mae",
+                            "mfe_R",
+                            "mae_R",
+                            "giveback",
+                            "equity_after",
+                            "entry_params",
+                            "exit_params",
+                        ]
+                        if c in trades_iter.columns
+                    ]
+                    st.dataframe(trades_iter[trade_cols] if trade_cols else trades_iter, use_container_width=True)
+            else:
+                st.info("No iteration ids available in results.")
+        else:
+            st.info("`limited_trades.csv` found, but missing `iter` column for drill-down.")
+    else:
+        st.info("Per-iteration trade details are not available for this run. Re-run limited tests to generate `limited_trades.csv`.")
 
     html_path = run_dir / "limited_interactive.html"
     if html_path.exists():
@@ -1602,6 +1685,20 @@ def main() -> None:
             similar_entry_criteria = {"total_return_%": {">": 0}}
 
             preset_defs: dict[str, dict[str, Any]] = {
+                "Core": {
+                    "entry_plugin": default_entry,
+                    "entry_params": _strategy_default_entry_params(),
+                    "exit_plugin": default_exit,
+                    "exit_params": _strategy_default_exit_params(),
+                    "sizing_plugin": default_sizing,
+                    "sizing_params": _strategy_default_sizing_params(),
+                    "seed_count": "",
+                    "seed_start": "",
+                    "exit_seed_count": "",
+                    "exit_seed_start": "",
+                    "favourable_criteria": "",
+                    "pass_threshold": "",
+                },
                 "Fixed ATR Exit": {
                     "entry_plugin": "sma_cross",
                     "entry_params": {"fast": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100], "slow": [100, 125, 150, 175, 200, 225, 250, 275, 300, 325]},
