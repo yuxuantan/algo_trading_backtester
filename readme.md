@@ -50,6 +50,13 @@ When runs are launched from Streamlit, interactive HTML charts are auto-generate
 ## 2. Download Data (Step by Step)
 
 The project includes a Dukascopy downloader CLI.
+Supported timeframes are discovered dynamically from your installed `dukascopy_python`.
+
+List all timeframes exposed by your installed `dukascopy_python` version:
+
+```bash
+python3 scripts/download_data.py --list-timeframes
+```
 
 ### 2.1 Download EURUSD 1H data for 2010-01-01 to 2013-01-01
 

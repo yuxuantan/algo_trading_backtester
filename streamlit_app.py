@@ -278,6 +278,34 @@ def _discover_download_symbols() -> list[str]:
     return deduped or ["EURUSD"]
 
 
+@st.cache_data(show_spinner=False)
+def _discover_download_timeframes() -> list[str]:
+    cmd = [SCRIPT_PYTHON, str(SCRIPTS_DIR / "download_data.py"), "--list-timeframes"]
+    rc, out = _run_cli(cmd)
+    fallback = ["1H", "4H", "1D"]
+    if rc != 0:
+        return fallback
+
+    units = {"S": 1, "M": 60, "H": 3600, "D": 86400, "W": 7 * 86400, "MO": 30 * 86400}
+
+    def _tf_sort_key(tf: str):
+        m = re.fullmatch(r"(\d+)(MO|S|M|H|D|W)", tf)
+        if not m:
+            return (1, tf)
+        n = int(m.group(1))
+        unit = m.group(2)
+        return (0, n * units[unit], n, unit)
+
+    timeframes: list[str] = []
+    for line in out.splitlines():
+        tf = line.strip().upper()
+        if re.fullmatch(r"[A-Z0-9_]+", tf):
+            timeframes.append(tf)
+
+    deduped = sorted(set(timeframes), key=_tf_sort_key)
+    return deduped or fallback
+
+
 def _list_csv_data_files() -> list[Path]:
     root = REPO_ROOT / "data"
     if not root.exists():
@@ -1161,6 +1189,7 @@ def main() -> None:
     mc_runs = _discover_mc_runs()
     limited_runs = _discover_limited_runs()
     download_symbols = _discover_download_symbols()
+    download_timeframes = _discover_download_timeframes()
 
     fallback_dataset = "data/processed/eurusd_1h_20100101_20260209_dukascopy_python.csv"
     if st.session_state["last_downloaded_dataset"]:
@@ -1854,9 +1883,10 @@ def main() -> None:
         st.header("Download Data")
 
         default_idx = download_symbols.index("EURUSD") if "EURUSD" in download_symbols else 0
+        default_tf_idx = download_timeframes.index("1H") if "1H" in download_timeframes else 0
         c1, c2, c3 = st.columns(3)
         symbol = c1.selectbox("Symbol", download_symbols, index=default_idx)
-        timeframe = c2.selectbox("Timeframe", ("1H", "4H", "1D"))
+        timeframe = c2.selectbox("Timeframe", download_timeframes, index=default_tf_idx)
         file_ext = c3.selectbox("File extension", ("csv", "parquet"))
 
         c4, c5 = st.columns(2)
@@ -1867,7 +1897,10 @@ def main() -> None:
         save_dir = c6.text_input("Save directory", value="data/processed")
         extra_args = c7.text_input("Extra args (optional)", value="", key="download_extra_args")
 
-        st.caption(f"Available Dukascopy FX symbols discovered: {len(download_symbols)}")
+        st.caption(
+            f"Available Dukascopy FX symbols: {len(download_symbols)} | "
+            f"timeframes: {len(download_timeframes)}"
+        )
 
         if st.button("Download data", type="primary"):
             try:
