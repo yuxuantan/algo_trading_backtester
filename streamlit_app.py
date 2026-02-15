@@ -263,7 +263,13 @@ def _discover_plugin_catalog() -> dict[str, dict[str, dict[str, Any]]]:
 
 @st.cache_data(show_spinner=False)
 def _discover_download_symbols() -> list[str]:
-    cmd = [SCRIPT_PYTHON, str(SCRIPTS_DIR / "download_data.py"), "--list-symbols"]
+    cmd = [
+        SCRIPT_PYTHON,
+        str(SCRIPTS_DIR / "download_data.py"),
+        "--provider",
+        "dukascopy",
+        "--list-symbols",
+    ]
     rc, out = _run_cli(cmd)
     if rc != 0:
         return ["EURUSD"]
@@ -278,23 +284,39 @@ def _discover_download_symbols() -> list[str]:
     return deduped or ["EURUSD"]
 
 
+def _sort_timeframes(values: list[str]) -> list[str]:
+    units = {"S": 1, "M": 60, "H": 3600, "D": 86400, "W": 7 * 86400, "MO": 30 * 86400, "MN": 30 * 86400}
+
+    def _tf_sort_key(tf: str):
+        tf = tf.upper()
+        m1 = re.fullmatch(r"(\d+)(MO|MN|S|M|H|D|W)", tf)
+        if m1:
+            n = int(m1.group(1))
+            unit = m1.group(2)
+            return (0, n * units[unit], n, unit, tf)
+        m2 = re.fullmatch(r"(MO|MN|S|M|H|D|W)(\d+)", tf)
+        if m2:
+            unit = m2.group(1)
+            n = int(m2.group(2))
+            return (0, n * units[unit], n, unit, tf)
+        return (1, tf)
+
+    return sorted(set(values), key=_tf_sort_key)
+
+
 @st.cache_data(show_spinner=False)
 def _discover_download_timeframes() -> list[str]:
-    cmd = [SCRIPT_PYTHON, str(SCRIPTS_DIR / "download_data.py"), "--list-timeframes"]
+    cmd = [
+        SCRIPT_PYTHON,
+        str(SCRIPTS_DIR / "download_data.py"),
+        "--provider",
+        "dukascopy",
+        "--list-timeframes",
+    ]
     rc, out = _run_cli(cmd)
     fallback = ["1H", "4H", "1D"]
     if rc != 0:
         return fallback
-
-    units = {"S": 1, "M": 60, "H": 3600, "D": 86400, "W": 7 * 86400, "MO": 30 * 86400}
-
-    def _tf_sort_key(tf: str):
-        m = re.fullmatch(r"(\d+)(MO|S|M|H|D|W)", tf)
-        if not m:
-            return (1, tf)
-        n = int(m.group(1))
-        unit = m.group(2)
-        return (0, n * units[unit], n, unit)
 
     timeframes: list[str] = []
     for line in out.splitlines():
@@ -302,7 +324,36 @@ def _discover_download_timeframes() -> list[str]:
         if re.fullmatch(r"[A-Z0-9_]+", tf):
             timeframes.append(tf)
 
-    deduped = sorted(set(timeframes), key=_tf_sort_key)
+    deduped = _sort_timeframes(timeframes)
+    return deduped or fallback
+
+
+@st.cache_data(show_spinner=False)
+def _discover_mt5_download_timeframes(mt5_backend: str, mt5_host: str, mt5_port: int) -> list[str]:
+    cmd = [
+        SCRIPT_PYTHON,
+        str(SCRIPTS_DIR / "download_data.py"),
+        "--provider",
+        "mt5_ftmo",
+        "--list-timeframes",
+        "--mt5-backend",
+        str(mt5_backend).strip(),
+        "--mt5-host",
+        str(mt5_host).strip(),
+        "--mt5-port",
+        str(int(mt5_port)),
+    ]
+    rc, out = _run_cli(cmd)
+    fallback = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+    if rc != 0:
+        return fallback
+
+    timeframes: list[str] = []
+    for line in out.splitlines():
+        tf = line.strip().upper()
+        if re.fullmatch(r"[A-Z0-9_]+", tf):
+            timeframes.append(tf)
+    deduped = _sort_timeframes(timeframes)
     return deduped or fallback
 
 
@@ -494,6 +545,14 @@ WF_FOLDS_RE = re.compile(r"folds=(\d+)")
 WF_FOLD_RE = re.compile(r"\[WFA\] fold (\d+)/(\d+)")
 MC_PROGRESS_RE = re.compile(r"\[MC\] (\d+)/(\d+)")
 LIMITED_PROGRESS_RE = re.compile(r"^\[\s*(\d+)/(\d+)\]")
+DOWNLOAD_BARS_PROGRESS_RE = re.compile(
+    r"Fetch progress \(bars mode\):.*rows=(\d+)/(\d+)\s+\(([0-9]+(?:\.[0-9]+)?)%\)",
+    re.IGNORECASE,
+)
+DOWNLOAD_BACKFILL_COVERAGE_RE = re.compile(
+    r"Backfill progress:\s*batches=(\d+),\s*rows=(\d+),.*time-coverage~([0-9]+(?:\.[0-9]+)?)%",
+    re.IGNORECASE,
+)
 
 
 def _progress_update(workflow: str, line: str, state: dict[str, Any]) -> tuple[float | None, str | None]:
@@ -530,6 +589,22 @@ def _progress_update(workflow: str, line: str, state: dict[str, Any]) -> tuple[f
             total = int(m.group(2))
             frac = i / total if total else 0.0
             return frac, f"Limited test iterations: {i}/{total}"
+
+    if workflow == "download":
+        m_bars = DOWNLOAD_BARS_PROGRESS_RE.search(text)
+        if m_bars:
+            done = int(m_bars.group(1))
+            total = int(m_bars.group(2))
+            frac = done / total if total else 0.0
+            return frac, f"Download progress (bars): {done}/{total}"
+
+        m_cov = DOWNLOAD_BACKFILL_COVERAGE_RE.search(text)
+        if m_cov:
+            batches = int(m_cov.group(1))
+            rows = int(m_cov.group(2))
+            cov_pct = float(m_cov.group(3))
+            frac = max(0.0, min(1.0, cov_pct / 100.0))
+            return frac, f"Backfill progress: batches={batches}, rows={rows}, coverage~{cov_pct:.2f}%"
 
     return None, None
 
@@ -1979,25 +2054,93 @@ def main() -> None:
     elif page == "download_data":
         st.header("Download Data")
 
-        default_idx = download_symbols.index("EURUSD") if "EURUSD" in download_symbols else 0
-        default_tf_idx = download_timeframes.index("1H") if "1H" in download_timeframes else 0
-        c1, c2, c3 = st.columns(3)
-        symbol = c1.selectbox("Symbol", download_symbols, index=default_idx)
-        timeframe = c2.selectbox("Timeframe", download_timeframes, index=default_tf_idx)
-        file_ext = c3.selectbox("File extension", ("csv", "parquet"))
-
-        c4, c5 = st.columns(2)
-        start_date = c4.date_input("Start date", value=date(2010, 1, 1))
-        end_date = c5.date_input("End date", value=date(2013, 1, 1))
-
-        c6, c7 = st.columns(2)
-        save_dir = c6.text_input("Save directory", value="data/processed")
-        extra_args = c7.text_input("Extra args (optional)", value="", key="download_extra_args")
-
-        st.caption(
-            f"Available Dukascopy FX symbols: {len(download_symbols)} | "
-            f"timeframes: {len(download_timeframes)}"
+        provider = st.selectbox(
+            "Provider",
+            options=("dukascopy", "mt5_ftmo"),
+            format_func=lambda p: "Dukascopy FX" if p == "dukascopy" else "MT5 / FTMO",
+            key="download_provider",
         )
+
+        symbol = "EURUSD"
+        timeframe = "1H"
+        mt5_backend = "silicon"
+        mt5_host = "localhost"
+        mt5_port = 8001
+        mt5_login_raw = ""
+        mt5_password = ""
+        mt5_server = ""
+        mt5_terminal_path = ""
+        mt5_batch_size = 1000
+        mt5_max_backfill_batches = 15000
+        mt5_progress_every = 25
+        mt5_allow_incomplete = False
+
+        c_date_1, c_date_2 = st.columns(2)
+        start_date = c_date_1.date_input("Start date", value=date(2010, 1, 1), key="download_start_date")
+        end_date = c_date_2.date_input("End date", value=date.today(), key="download_end_date")
+
+        if provider == "dukascopy":
+            default_idx = download_symbols.index("EURUSD") if "EURUSD" in download_symbols else 0
+            default_tf_idx = download_timeframes.index("1H") if "1H" in download_timeframes else 0
+            c1, c2 = st.columns(2)
+            symbol = c1.selectbox("Symbol", download_symbols, index=default_idx, key="download_symbol_dk")
+            timeframe = c2.selectbox("Timeframe", download_timeframes, index=default_tf_idx, key="download_tf_dk")
+            st.caption(
+                f"Available Dukascopy FX symbols: {len(download_symbols)} | "
+                f"timeframes: {len(download_timeframes)}"
+            )
+        else:
+            c1, c2, c3 = st.columns(3)
+            mt5_backend = c1.selectbox(
+                "MT5 backend",
+                options=("silicon", "auto", "native"),
+                index=0,
+                key="download_mt5_backend",
+            )
+            mt5_host = c2.text_input("MT5 host", value="localhost", key="download_mt5_host").strip() or "localhost"
+            mt5_port = int(c3.number_input("MT5 port", min_value=1, max_value=65535, value=8001, step=1, key="download_mt5_port"))
+
+            mt5_timeframes = _discover_mt5_download_timeframes(mt5_backend, mt5_host, mt5_port)
+            default_mt5_tf_idx = mt5_timeframes.index("M5") if "M5" in mt5_timeframes else 0
+            c4, c5 = st.columns(2)
+            symbol = c4.text_input("Symbol", value="EURUSD", key="download_symbol_mt5").strip().upper() or "EURUSD"
+            timeframe = c5.selectbox("Timeframe", mt5_timeframes, index=default_mt5_tf_idx, key="download_tf_mt5")
+
+            c6, c7, c8 = st.columns(3)
+            mt5_login_raw = c6.text_input("MT5 login (optional)", value="", key="download_mt5_login")
+            mt5_password = c7.text_input("MT5 password (optional)", value="", type="password", key="download_mt5_password")
+            mt5_server = c8.text_input("MT5 server (optional)", value="", key="download_mt5_server")
+            mt5_terminal_path = st.text_input("MT5 terminal path (native backend only)", value="", key="download_mt5_terminal_path")
+
+            c9, c10, c11, c12 = st.columns(4)
+            mt5_batch_size = int(c9.number_input("Batch size", min_value=10, max_value=20000, value=1000, step=10, key="download_mt5_batch_size"))
+            mt5_max_backfill_batches = int(
+                c10.number_input(
+                    "Max backfill batches",
+                    min_value=10,
+                    max_value=200000,
+                    value=15000,
+                    step=100,
+                    key="download_mt5_max_backfill_batches",
+                )
+            )
+            mt5_progress_every = int(
+                c11.number_input(
+                    "Progress every N batches",
+                    min_value=0,
+                    max_value=10000,
+                    value=25,
+                    step=1,
+                    key="download_mt5_progress_every",
+                )
+            )
+            mt5_allow_incomplete = c12.checkbox("Allow incomplete", value=False, key="download_mt5_allow_incomplete")
+            st.caption(f"Detected MT5 timeframes: {len(mt5_timeframes)} (from connected backend if available)")
+
+        c_common_1, c_common_2, c_common_3 = st.columns(3)
+        file_ext = c_common_1.selectbox("File extension", ("csv", "parquet"), key="download_file_ext")
+        save_dir = c_common_2.text_input("Save directory", value="data/processed", key="download_save_dir")
+        extra_args = c_common_3.text_input("Extra args (optional)", value="", key="download_extra_args")
 
         if st.button("Download data", type="primary"):
             try:
@@ -2007,6 +2150,8 @@ def main() -> None:
                 cmd = [
                     SCRIPT_PYTHON,
                     str(SCRIPTS_DIR / "download_data.py"),
+                    "--provider",
+                    provider,
                     "--symbol",
                     symbol.strip().upper(),
                     "--timeframe",
@@ -2020,6 +2165,37 @@ def main() -> None:
                     "--file-ext",
                     file_ext,
                 ]
+                if provider == "mt5_ftmo":
+                    cmd.extend(
+                        [
+                            "--mt5-backend",
+                            mt5_backend,
+                            "--mt5-host",
+                            mt5_host,
+                            "--mt5-port",
+                            str(int(mt5_port)),
+                            "--mt5-batch-size",
+                            str(int(mt5_batch_size)),
+                            "--mt5-max-backfill-batches",
+                            str(int(mt5_max_backfill_batches)),
+                            "--mt5-progress-every",
+                            str(int(mt5_progress_every)),
+                        ]
+                    )
+                    if mt5_login_raw.strip():
+                        try:
+                            int(mt5_login_raw.strip())
+                        except ValueError as e:
+                            raise ValueError("MT5 login must be an integer when provided.") from e
+                        cmd.extend(["--mt5-login", mt5_login_raw.strip()])
+                    if mt5_password.strip():
+                        cmd.extend(["--mt5-password", mt5_password.strip()])
+                    if mt5_server.strip():
+                        cmd.extend(["--mt5-server", mt5_server.strip()])
+                    if mt5_terminal_path.strip():
+                        cmd.extend(["--mt5-terminal-path", mt5_terminal_path.strip()])
+                    if mt5_allow_incomplete:
+                        cmd.append("--mt5-allow-incomplete")
                 cmd.extend(_parse_extra_args(extra_args))
             except ValueError as e:
                 st.error(f"Invalid arguments: {e}")
@@ -2027,6 +2203,8 @@ def main() -> None:
                 rc, out = _run_cli_live(cmd, workflow="download")
                 if rc == 0:
                     dataset_path = _extract_path_after_marker(out, "rows to:")
+                    if dataset_path is None:
+                        dataset_path = _extract_path_after_marker(out, "Saved dataset:")
                     meta_path = _extract_path_after_marker(out, "Metadata:")
                     if dataset_path is not None:
                         st.session_state["last_downloaded_dataset"] = dataset_path.as_posix()

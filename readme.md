@@ -47,27 +47,73 @@ When runs are launched from Streamlit, interactive HTML charts are auto-generate
 - Monte Carlo: `mc_interactive.html`
 - Limited tests: `limited_interactive.html`
 
+### 1.2 MT5 On macOS (siliconmetatrader5)
+
+Use the bootstrap script to install/check local dependencies (`colima`, `docker`, `docker-compose`), start Colima in `x86_64`, clone/start `silicon-metatrader5`, and optionally install Python extras.
+
+```bash
+bash scripts/setup_silicon_mt5_local.sh --with-python-deps
+```
+
+Then fetch MT5 bars through the local bridge:
+
+```bash
+python3 scripts/fetch_mt5_live_data.py \
+  --provider silicon \
+  --host localhost \
+  --port 8001 \
+  --symbol EURUSD \
+  --timeframe M5 \
+  --start 2025-01-01 \
+  --end 2025-02-01
+```
+
+Notes:
+- Range mode uses UTC and treats `--end` as exclusive (`[start, end)`).
+- Script performs completeness checks and reports missing ranges when coverage is poor.
+
 ## 2. Download Data (Step by Step)
 
-The project includes a Dukascopy downloader CLI.
-Supported timeframes are discovered dynamically from your installed `dukascopy_python`.
+The project includes a unified downloader CLI:
+
+- `--provider dukascopy`
+- `--provider mt5_ftmo`
+
+Dukascopy timeframes are discovered dynamically from your installed `dukascopy_python`.
 
 List all timeframes exposed by your installed `dukascopy_python` version:
 
 ```bash
-python3 scripts/download_data.py --list-timeframes
+python3 scripts/download_data.py --provider dukascopy --list-timeframes
 ```
 
 ### 2.1 Download EURUSD 1H data for 2010-01-01 to 2013-01-01
 
 ```bash
 python3 scripts/download_data.py \
+  --provider dukascopy \
   --symbol EURUSD \
   --timeframe 1H \
   --start 2010-01-01 \
   --end 2013-01-01 \
   --save-dir data/processed \
   --file-ext csv
+```
+
+### 2.3 Download MT5/FTMO data by date range
+
+```bash
+python3 scripts/download_data.py \
+  --provider mt5_ftmo \
+  --symbol EURUSD \
+  --timeframe M5 \
+  --start 2025-01-01 \
+  --end 2025-02-01 \
+  --save-dir data/processed \
+  --file-ext csv \
+  --mt5-backend silicon \
+  --mt5-host localhost \
+  --mt5-port 8001
 ```
 
 ### 2.2 Expected outputs

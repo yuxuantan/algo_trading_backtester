@@ -24,6 +24,12 @@ dependencies = [
 ui = [
   "streamlit>=1.30",
 ]
+mt5 = [
+  "MetaTrader5>=5.0; platform_system == 'Windows'",
+]
+mt5-mac = [
+  "siliconmetatrader5",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
