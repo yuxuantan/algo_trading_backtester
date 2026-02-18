@@ -130,11 +130,19 @@ def build_figure(*, results: pd.DataFrame, pass_summary: dict, title: str):
     favourable_pct = float(pass_summary.get("favourable_pct", float("nan")))
     pass_threshold = float(pass_summary.get("pass_threshold_%", float("nan")))
     passed = bool(pass_summary.get("passed", False))
+    win_med = _series(results, "win_rate_%").median() if "win_rate_%" in results.columns else float("nan")
+    cagr_med = _series(results, "cagr_%").median() if "cagr_%" in results.columns else float("nan")
+    mar_med = _series(results, "mar").median() if "mar" in results.columns else float("nan")
+    sortino_med = _series(results, "sortino").median() if "sortino" in results.columns else float("nan")
 
     subtitle = (
         f"Favourable={favourable_pct:.2f}% | "
         f"Threshold={pass_threshold:.2f}% | "
-        f"Status={'PASS' if passed else 'FAIL'}"
+        f"Status={'PASS' if passed else 'FAIL'} | "
+        f"Median WinRate={win_med:.2f}% | "
+        f"Median CAGR={cagr_med:.2f}% | "
+        f"Median MAR={mar_med:.3f} | "
+        f"Median Sortino={sortino_med:.3f}"
     )
     fig.update_layout(
         template="plotly_white",

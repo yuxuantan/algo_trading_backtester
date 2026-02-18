@@ -98,6 +98,7 @@ def build_spec_from_args(args: argparse.Namespace) -> dict:
     if args.min_trades is not None:
         spec.setdefault("test", {})["min_trades"] = args.min_trades
     spec.setdefault("test", {}).setdefault("strategy_tag", args.strategy.rsplit(".", 1)[-1])
+    spec.setdefault("test", {}).setdefault("strategy_module", args.strategy)
 
     if args.commission_rt is not None or args.lot_size is not None:
         cfg = spec.setdefault("config", {})

@@ -195,6 +195,9 @@ def build_figure(
         f"Risk of Ruin={_safe_float(metrics.get('risk_of_ruin_pct')):.2f}% | "
         f"Median DD={_safe_float(metrics.get('median_max_drawdown_%')):.2f}% | "
         f"Median Return={_safe_float(metrics.get('median_return_%')):.2f}% | "
+        f"Median CAGR={_safe_float(metrics.get('median_cagr_%')):.2f}% | "
+        f"Median Sortino={_safe_float(metrics.get('median_sortino')):.3f} | "
+        f"Median MAR={_safe_float(metrics.get('median_mar')):.3f} | "
         f"R/DD (ratio of medians)={_safe_float(metrics.get('return_drawdown_ratio_ratio_of_medians')):.3f}"
     )
 

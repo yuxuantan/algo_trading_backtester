@@ -18,29 +18,33 @@ ST_RED = 2
 
 @dataclass(frozen=True)
 class InterEquityLiqSweepParams:
-    # Tunable params
-    min_rr: float = 2.0
-    max_rr: float = 10.0
+    # Core tuning knobs (keep this list small to reduce data-snooping risk).
+    # - htf: market-structure granularity
+    # - atr_dist_for_liq_generation: equal-high/low proximity tolerance
+    # - liq_move_away_atr: confirmation strictness
+    # - max_rr: upper reward:risk gate
+    max_rr: float = 5.0
     atr_dist_for_liq_generation: float = 1.0
+    liq_move_away_atr: float = 3.0
+    htf: str = "30"
 
-    # Config-like params
-    htf: str = "60"
+    # Kept mostly fixed (not part of default optimizer grid).
+    min_rr: float = 1.0
     show_ltf: bool = True
     show_htf: bool = True
 
-    # Fixed strategy params (defaulted to Pine values)
+    # Structural constants
     ltf_pivot_len: int = 3
     htf_pivot_len: int = 3
     atr_len: int = 14
     risk_pct: float = 0.01
-    sl_buffer_pips: float = 1.0
-    liq_move_away_atr: float = 3.0
+    sl_buffer_pips: float = 0.2
 
     # Instrument config
     pip_size: float = 0.0001
     min_tick: float = 1e-5
 
-    # Runtime caps (mirrors Pine line budgets)
+    # Runtime caps
     max_ltf_h: int = 150
     max_ltf_l: int = 150
     max_htf_h: int = 100
@@ -76,6 +80,8 @@ class InterEquityLiqSweepParams:
             raise ValueError(f"max_rr must be > min_rr. Got min_rr={self.min_rr}, max_rr={self.max_rr}")
         if self.atr_dist_for_liq_generation < 0:
             raise ValueError("atr_dist_for_liq_generation must be >= 0")
+        if self.liq_move_away_atr <= 0:
+            raise ValueError("liq_move_away_atr must be > 0")
         if self.ltf_pivot_len <= 0 or self.htf_pivot_len <= 0:
             raise ValueError("ltf_pivot_len and htf_pivot_len must be > 0")
         if self.atr_len <= 0:
@@ -93,6 +99,8 @@ Params = InterEquityLiqSweepParams
 class _LevelPool:
     max_size: int
     lvls: list[float] = field(default_factory=list)
+    line_ids: list[int] = field(default_factory=list)
+    next_line_id: int = 0
     act: list[bool] = field(default_factory=list)
     breach_time: list[pd.Timestamp | None] = field(default_factory=list)
     drawn_act: list[bool] = field(default_factory=list)
@@ -103,15 +111,42 @@ class _LevelPool:
     pend_trigger: list[float] = field(default_factory=list)
     pend_ok: list[bool] = field(default_factory=list)
 
-    def trim(self) -> None:
+    def trim(
+        self,
+        *,
+        pool_name: str | None = None,
+        event_time: pd.Timestamp | None = None,
+        line_events: list[dict[str, Any]] | None = None,
+    ) -> None:
         if len(self.lvls) <= self.max_size:
             return
 
+        old_lvl = float(self.lvls[0])
+        old_line_id = int(self.line_ids[0])
+        old_drawn_act = bool(self.drawn_act[0])
+
         self.lvls.pop(0)
+        self.line_ids.pop(0)
         self.act.pop(0)
         self.breach_time.pop(0)
         self.drawn_act.pop(0)
         self.state.pop(0)
+
+        if (
+            old_drawn_act
+            and pool_name is not None
+            and event_time is not None
+            and line_events is not None
+        ):
+            line_events.append(
+                {
+                    "type": "line_deactivated",
+                    "pool": pool_name,
+                    "line_id": old_line_id,
+                    "time": pd.Timestamp(event_time),
+                    "level": old_lvl,
+                }
+            )
 
         for k in range(len(self.pend_a) - 1, -1, -1):
             a = self.pend_a[k]
@@ -203,11 +238,13 @@ def _track_breach_low(pool: _LevelPool, low_val: float, breach_t: pd.Timestamp) 
 def _append_high_pivot(
     *,
     pool: _LevelPool,
+    pool_name: str,
     pivot_value: float,
     pivot_time: pd.Timestamp,
     pivot_atr: float,
     atr_dist_for_liq_generation: float,
     liq_move_away_atr: float,
+    line_events: list[dict[str, Any]] | None = None,
 ) -> None:
     swept_earlier = any(bt is not None and bt == pivot_time for bt in pool.breach_time)
 
@@ -224,12 +261,27 @@ def _append_high_pivot(
 
     base_state = ST_PURPLE if swept_earlier else ST_BLACK
 
+    line_id = pool.next_line_id
+    pool.next_line_id += 1
     curr_idx = len(pool.lvls)
     pool.lvls.append(float(pivot_value))
+    pool.line_ids.append(line_id)
     pool.act.append(True)
     pool.breach_time.append(None)
     pool.drawn_act.append(True)
     pool.state.append(base_state)
+
+    if line_events is not None:
+        line_events.append(
+            {
+                "type": "line_created",
+                "pool": pool_name,
+                "line_id": int(line_id),
+                "time": pd.Timestamp(pivot_time),
+                "level": float(pivot_value),
+                "state": int(base_state),
+            }
+        )
 
     if match is not None and match_lvl is not None:
         pair_high = max(float(pivot_value), float(match_lvl))
@@ -239,17 +291,23 @@ def _append_high_pivot(
         pool.pend_trigger.append(trigger_down)
         pool.pend_ok.append(False)
 
-    pool.trim()
+    pool.trim(
+        pool_name=pool_name,
+        event_time=pivot_time,
+        line_events=line_events,
+    )
 
 
 def _append_low_pivot(
     *,
     pool: _LevelPool,
+    pool_name: str,
     pivot_value: float,
     pivot_time: pd.Timestamp,
     pivot_atr: float,
     atr_dist_for_liq_generation: float,
     liq_move_away_atr: float,
+    line_events: list[dict[str, Any]] | None = None,
 ) -> None:
     swept_earlier = any(bt is not None and bt == pivot_time for bt in pool.breach_time)
 
@@ -266,12 +324,27 @@ def _append_low_pivot(
 
     base_state = ST_PURPLE if swept_earlier else ST_BLACK
 
+    line_id = pool.next_line_id
+    pool.next_line_id += 1
     curr_idx = len(pool.lvls)
     pool.lvls.append(float(pivot_value))
+    pool.line_ids.append(line_id)
     pool.act.append(True)
     pool.breach_time.append(None)
     pool.drawn_act.append(True)
     pool.state.append(base_state)
+
+    if line_events is not None:
+        line_events.append(
+            {
+                "type": "line_created",
+                "pool": pool_name,
+                "line_id": int(line_id),
+                "time": pd.Timestamp(pivot_time),
+                "level": float(pivot_value),
+                "state": int(base_state),
+            }
+        )
 
     if match is not None and match_lvl is not None:
         pair_low = min(float(pivot_value), float(match_lvl))
@@ -281,10 +354,21 @@ def _append_low_pivot(
         pool.pend_trigger.append(trigger_up)
         pool.pend_ok.append(False)
 
-    pool.trim()
+    pool.trim(
+        pool_name=pool_name,
+        event_time=pivot_time,
+        line_events=line_events,
+    )
 
 
-def _confirm_move_away_high(pool: _LevelPool, close_val: float) -> None:
+def _confirm_move_away_high(
+    pool: _LevelPool,
+    close_val: float,
+    *,
+    pool_name: str,
+    event_time: pd.Timestamp,
+    line_events: list[dict[str, Any]] | None = None,
+) -> None:
     for k in range(len(pool.pend_a)):
         if pool.pend_ok[k]:
             continue
@@ -293,13 +377,42 @@ def _confirm_move_away_high(pool: _LevelPool, close_val: float) -> None:
             a = pool.pend_a[k]
             b = pool.pend_b[k]
             if _both_active(pool.act, a, b):
-                pool.state[a] = ST_RED
-                pool.state[b] = ST_RED
+                if pool.state[a] != ST_RED:
+                    pool.state[a] = ST_RED
+                    if line_events is not None:
+                        line_events.append(
+                            {
+                                "type": "line_promoted_red",
+                                "pool": pool_name,
+                                "line_id": int(pool.line_ids[a]),
+                                "time": pd.Timestamp(event_time),
+                                "level": float(pool.lvls[a]),
+                            }
+                        )
+                if pool.state[b] != ST_RED:
+                    pool.state[b] = ST_RED
+                    if line_events is not None:
+                        line_events.append(
+                            {
+                                "type": "line_promoted_red",
+                                "pool": pool_name,
+                                "line_id": int(pool.line_ids[b]),
+                                "time": pd.Timestamp(event_time),
+                                "level": float(pool.lvls[b]),
+                            }
+                        )
                 pool.pend_ok[k] = True
                 break
 
 
-def _confirm_move_away_low(pool: _LevelPool, close_val: float) -> None:
+def _confirm_move_away_low(
+    pool: _LevelPool,
+    close_val: float,
+    *,
+    pool_name: str,
+    event_time: pd.Timestamp,
+    line_events: list[dict[str, Any]] | None = None,
+) -> None:
     for k in range(len(pool.pend_a)):
         if pool.pend_ok[k]:
             continue
@@ -308,22 +421,78 @@ def _confirm_move_away_low(pool: _LevelPool, close_val: float) -> None:
             a = pool.pend_a[k]
             b = pool.pend_b[k]
             if _both_active(pool.act, a, b):
-                pool.state[a] = ST_RED
-                pool.state[b] = ST_RED
+                if pool.state[a] != ST_RED:
+                    pool.state[a] = ST_RED
+                    if line_events is not None:
+                        line_events.append(
+                            {
+                                "type": "line_promoted_red",
+                                "pool": pool_name,
+                                "line_id": int(pool.line_ids[a]),
+                                "time": pd.Timestamp(event_time),
+                                "level": float(pool.lvls[a]),
+                            }
+                        )
+                if pool.state[b] != ST_RED:
+                    pool.state[b] = ST_RED
+                    if line_events is not None:
+                        line_events.append(
+                            {
+                                "type": "line_promoted_red",
+                                "pool": pool_name,
+                                "line_id": int(pool.line_ids[b]),
+                                "time": pd.Timestamp(event_time),
+                                "level": float(pool.lvls[b]),
+                            }
+                        )
                 pool.pend_ok[k] = True
                 break
 
 
-def _stop_extending_high(pool: _LevelPool, high_val: float) -> None:
+def _stop_extending_high(
+    pool: _LevelPool,
+    high_val: float,
+    *,
+    pool_name: str,
+    event_time: pd.Timestamp,
+    line_events: list[dict[str, Any]] | None = None,
+) -> None:
     for i in range(len(pool.lvls)):
         if pool.drawn_act[i] and high_val > pool.lvls[i]:
             pool.drawn_act[i] = False
+            if line_events is not None:
+                line_events.append(
+                    {
+                        "type": "line_deactivated",
+                        "pool": pool_name,
+                        "line_id": int(pool.line_ids[i]),
+                        "time": pd.Timestamp(event_time),
+                        "level": float(pool.lvls[i]),
+                    }
+                )
 
 
-def _stop_extending_low(pool: _LevelPool, low_val: float) -> None:
+def _stop_extending_low(
+    pool: _LevelPool,
+    low_val: float,
+    *,
+    pool_name: str,
+    event_time: pd.Timestamp,
+    line_events: list[dict[str, Any]] | None = None,
+) -> None:
     for i in range(len(pool.lvls)):
         if pool.drawn_act[i] and low_val < pool.lvls[i]:
             pool.drawn_act[i] = False
+            if line_events is not None:
+                line_events.append(
+                    {
+                        "type": "line_deactivated",
+                        "pool": pool_name,
+                        "line_id": int(pool.line_ids[i]),
+                        "time": pd.Timestamp(event_time),
+                        "level": float(pool.lvls[i]),
+                    }
+                )
 
 
 def _ltf_sweep_triggers(
@@ -331,26 +500,46 @@ def _ltf_sweep_triggers(
     ltf_l: _LevelPool,
     high_val: float,
     low_val: float,
+    *,
+    event_time: pd.Timestamp,
+    line_events: list[dict[str, Any]] | None = None,
 ) -> tuple[bool, bool]:
     trig_short = False
     trig_long = False
 
+    # Deactivate all breached LTF high lines on the current bar.
     for i in range(len(ltf_h.lvls)):
         if ltf_h.drawn_act[i] and high_val > ltf_h.lvls[i]:
             if ltf_h.state[i] == ST_RED:
                 trig_short = True
             ltf_h.drawn_act[i] = False
-            if trig_short:
-                break
+            if line_events is not None:
+                line_events.append(
+                    {
+                        "type": "line_deactivated",
+                        "pool": "ltf_h",
+                        "line_id": int(ltf_h.line_ids[i]),
+                        "time": pd.Timestamp(event_time),
+                        "level": float(ltf_h.lvls[i]),
+                    }
+                )
 
-    if not trig_short:
-        for i in range(len(ltf_l.lvls)):
-            if ltf_l.drawn_act[i] and low_val < ltf_l.lvls[i]:
-                if ltf_l.state[i] == ST_RED:
-                    trig_long = True
-                ltf_l.drawn_act[i] = False
-                if trig_long:
-                    break
+    # Deactivate all breached LTF low lines on the current bar.
+    for i in range(len(ltf_l.lvls)):
+        if ltf_l.drawn_act[i] and low_val < ltf_l.lvls[i]:
+            if ltf_l.state[i] == ST_RED:
+                trig_long = True
+            ltf_l.drawn_act[i] = False
+            if line_events is not None:
+                line_events.append(
+                    {
+                        "type": "line_deactivated",
+                        "pool": "ltf_l",
+                        "line_id": int(ltf_l.line_ids[i]),
+                        "time": pd.Timestamp(event_time),
+                        "level": float(ltf_l.lvls[i]),
+                    }
+                )
 
     return trig_short, trig_long
 
@@ -545,6 +734,7 @@ def run_backtest(
     *,
     strategy_params: InterEquityLiqSweepParams,
     cfg: BacktestConfig = BacktestConfig(),
+    debug: dict[str, Any] | None = None,
 ):
     p = strategy_params
     df = df_sig.copy().sort_index()
@@ -557,6 +747,7 @@ def run_backtest(
     pos: dict[str, Any] | None = None
     pending_entry: dict[str, Any] | None = None
     pending_market_exit: dict[str, Any] | None = None
+    line_events: list[dict[str, Any]] = []
 
     ltf_h = _LevelPool(max_size=p.max_ltf_h)
     ltf_l = _LevelPool(max_size=p.max_ltf_l)
@@ -700,27 +891,50 @@ def run_backtest(
             if ltf_ph is not None and ltf_pivot_time is not None and ltf_pivot_atr is not None:
                 _append_high_pivot(
                     pool=ltf_h,
+                    pool_name="ltf_h",
                     pivot_value=float(ltf_ph),
                     pivot_time=ltf_pivot_time,
                     pivot_atr=float(ltf_pivot_atr),
                     atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
                     liq_move_away_atr=p.liq_move_away_atr,
+                    line_events=line_events,
                 )
 
             if ltf_pl is not None and ltf_pivot_time is not None and ltf_pivot_atr is not None:
                 _append_low_pivot(
                     pool=ltf_l,
+                    pool_name="ltf_l",
                     pivot_value=float(ltf_pl),
                     pivot_time=ltf_pivot_time,
                     pivot_atr=float(ltf_pivot_atr),
                     atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
                     liq_move_away_atr=p.liq_move_away_atr,
+                    line_events=line_events,
                 )
 
-            _confirm_move_away_high(ltf_h, c)
-            _confirm_move_away_low(ltf_l, c)
+            _confirm_move_away_high(
+                ltf_h,
+                c,
+                pool_name="ltf_h",
+                event_time=t,
+                line_events=line_events,
+            )
+            _confirm_move_away_low(
+                ltf_l,
+                c,
+                pool_name="ltf_l",
+                event_time=t,
+                line_events=line_events,
+            )
 
-            trig_short, trig_long = _ltf_sweep_triggers(ltf_h, ltf_l, h, l)
+            trig_short, trig_long = _ltf_sweep_triggers(
+                ltf_h,
+                ltf_l,
+                h,
+                l,
+                event_time=t,
+                line_events=line_events,
+            )
 
         # ---- HTF aggregation + state machine ----
         bucket = _bucket_floor(t, htf_minutes)
@@ -770,25 +984,41 @@ def run_backtest(
                 if htf_ph is not None and htf_pivot_time is not None and htf_pivot_atr is not None:
                     _append_high_pivot(
                         pool=htf_h,
+                        pool_name="htf_h",
                         pivot_value=float(htf_ph),
                         pivot_time=htf_pivot_time,
                         pivot_atr=float(htf_pivot_atr),
                         atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
                         liq_move_away_atr=p.liq_move_away_atr,
+                        line_events=line_events,
                     )
 
                 if htf_pl is not None and htf_pivot_time is not None and htf_pivot_atr is not None:
                     _append_low_pivot(
                         pool=htf_l,
+                        pool_name="htf_l",
                         pivot_value=float(htf_pl),
                         pivot_time=htf_pivot_time,
                         pivot_atr=float(htf_pivot_atr),
                         atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
                         liq_move_away_atr=p.liq_move_away_atr,
+                        line_events=line_events,
                     )
 
-                _confirm_move_away_high(htf_h, fin_close)
-                _confirm_move_away_low(htf_l, fin_close)
+                _confirm_move_away_high(
+                    htf_h,
+                    fin_close,
+                    pool_name="htf_h",
+                    event_time=fin_time,
+                    line_events=line_events,
+                )
+                _confirm_move_away_low(
+                    htf_l,
+                    fin_close,
+                    pool_name="htf_l",
+                    event_time=fin_time,
+                    line_events=line_events,
+                )
 
             curr_bucket = bucket
             htf_open = o
@@ -797,8 +1027,20 @@ def run_backtest(
             htf_close = c
 
         if p.show_htf:
-            _stop_extending_high(htf_h, h)
-            _stop_extending_low(htf_l, l)
+            _stop_extending_high(
+                htf_h,
+                h,
+                pool_name="htf_h",
+                event_time=t,
+                line_events=line_events,
+            )
+            _stop_extending_low(
+                htf_l,
+                l,
+                pool_name="htf_l",
+                event_time=t,
+                line_events=line_events,
+            )
 
         # ---- Strategy entries (signal bar -> enter next bar open) ----
         flat = pos is None
@@ -898,6 +1140,9 @@ def run_backtest(
             "profit_factor": np.nan,
             "avg_R": np.nan,
         }
+        if debug is not None:
+            debug["line_events"] = line_events
+            debug["line_event_count"] = len(line_events)
         return equity_df, trades_df, summary
 
     total_return = (float(equity_df["equity"].iloc[-1]) / float(cfg.initial_equity)) - 1.0
@@ -915,13 +1160,18 @@ def run_backtest(
         "profit_factor": pf,
         "avg_R": avg_r,
     }
+    if debug is not None:
+        debug["line_events"] = line_events
+        debug["line_event_count"] = len(line_events)
     return equity_df, trades_df, summary
 
 
 PARAM_SPACE = {
-    "min_rr": [2.0, 2.5, 3.0],
-    "max_rr": [8.0, 10.0, 12.0],
+    # Deliberately compact search space to balance robustness vs overfitting.
+    "htf": ["30", "60"],
     "atr_dist_for_liq_generation": [0.8, 1.0, 1.2],
+    "liq_move_away_atr": [2.5, 3.0],
+    "max_rr": [4.0, 6.0, 8.0],
 }
 
 
@@ -938,17 +1188,18 @@ STRATEGY = {
             {
                 "name": "interequity_liqsweep_entry",
                 "params": {
-                    "min_rr": 2.0,
-                    "max_rr": 10.0,
+                    "min_rr": 1.0,
+                    "max_rr": 5.0,
                     "atr_dist_for_liq_generation": 1.0,
-                    "htf": "60",
+                    "liq_move_away_atr": 3.0,
+                    "htf": "30",
                 },
             }
         ],
     },
     "exit": {
         "name": "interequity_liqsweep_exit",
-        "params": {"min_rr": 2.0, "sl_buffer_pips": 1.0, "pip_size": 0.0001},
+        "params": {"min_rr": 1.0, "sl_buffer_pips": 0.2, "pip_size": 0.0001},
     },
     "sizing": {
         "name": "fixed_risk",

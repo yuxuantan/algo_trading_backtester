@@ -24,11 +24,11 @@ def build_exit(side: str, entry_open: float, prev_low: float, prev_high: float, 
             if cached is not None:
                 return cached
 
-    rr = float(params.get("rr", params.get("min_rr", 2.0)))
+    rr = float(params.get("rr", params.get("min_rr", 1.0)))
     if rr <= 0:
         return None
 
-    sl_buffer_pips = float(params.get("sl_buffer_pips", 1.0))
+    sl_buffer_pips = float(params.get("sl_buffer_pips", 0.2))
     pip_size = float(params.get("pip_size", 0.0001))
     sl_buffer = sl_buffer_pips * pip_size
 
@@ -49,4 +49,3 @@ def build_exit(side: str, entry_open: float, prev_low: float, prev_high: float, 
         return {"sl": sl, "tp": tp, "stop_dist": stop_dist}
 
     raise ValueError("side must be long/short")
-

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ast
+import copy
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import date
 import importlib
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,6 +21,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:
+    import altair as alt
+except ImportError:  # pragma: no cover - fallback used when altair is unavailable
+    alt = None
 
 try:
     import plotly.express as px
@@ -48,6 +56,9 @@ SCRIPT_PYTHON = _resolve_script_python()
 COMMON_WF_OBJECTIVES = [
     "return_on_account",
     "total_return_%",
+    "cagr_%",
+    "sortino",
+    "mar",
     "net_profit_abs",
     "max_drawdown_abs_%",
     "equity_linearity_score",
@@ -458,6 +469,30 @@ def _status_label(ok: bool) -> str:
     return "PASS" if ok else "FAIL"
 
 
+def _render_status_badge(label: str, ok: bool) -> None:
+    status = _status_label(ok)
+    if ok:
+        border = "#16a34a"
+        bg = "rgba(22,163,74,0.10)"
+        fg = "#166534"
+    else:
+        border = "#dc2626"
+        bg = "rgba(220,38,38,0.10)"
+        fg = "#991b1b"
+
+    st.markdown(
+        (
+            f'<div style="display:inline-flex;align-items:center;gap:10px;'
+            f'padding:8px 14px;border-radius:10px;border:2px solid {border};'
+            f'background:{bg};margin:4px 0 10px 0;">'
+            f'<span style="font-size:13px;font-weight:600;color:{fg};">{label}</span>'
+            f'<span style="font-size:30px;line-height:1;font-weight:900;color:{fg};">{status}</span>'
+            f"</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def _criteria_table(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, bool]:
     df = pd.DataFrame(rows)
     if df.empty:
@@ -465,7 +500,191 @@ def _criteria_table(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, bool]:
 
     df["Status"] = df["Passed"].map(_status_label)
     overall = bool(df["Passed"].all())
-    return df[["Criterion", "Target", "Actual", "Status"]], overall
+    out = df[["Criterion", "Target", "Actual", "Status"]].copy()
+    # Arrow serialization in Streamlit is strict about mixed object dtypes.
+    # Normalize all display columns to string to avoid intermittent warnings.
+    for col in ("Criterion", "Target", "Actual", "Status"):
+        out[col] = out[col].astype(str)
+    return out, overall
+
+
+def _median_numeric(df: pd.DataFrame, col: str) -> float:
+    if col not in df.columns:
+        return float("nan")
+    s = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if s.empty:
+        return float("nan")
+    return float(s.median())
+
+
+def _parse_params_cell(raw: Any) -> Any:
+    if isinstance(raw, (dict, list)):
+        return raw
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() == "nan":
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(text)
+    except Exception:
+        return None
+
+
+def _extract_numeric_param(raw: Any, keys: list[str]) -> float:
+    parsed = _parse_params_cell(raw)
+    candidates: list[dict[str, Any]] = []
+    if isinstance(parsed, dict):
+        candidates = [parsed]
+    elif isinstance(parsed, list):
+        candidates = [x for x in parsed if isinstance(x, dict)]
+
+    for cand in candidates:
+        for k in keys:
+            if k in cand:
+                v = _as_float(cand.get(k))
+                if pd.notna(v):
+                    return float(v)
+    return float("nan")
+
+
+def _iqr_numeric(df: pd.DataFrame, col: str) -> float:
+    if col not in df.columns:
+        return float("nan")
+    s = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if s.empty:
+        return float("nan")
+    q75 = float(s.quantile(0.75))
+    q25 = float(s.quantile(0.25))
+    return q75 - q25
+
+
+def _render_limited_atr_robustness(results: pd.DataFrame) -> None:
+    if results.empty or "exit_params" not in results.columns:
+        return
+
+    work = results.copy()
+    work["_sldist_atr_mult"] = work["exit_params"].apply(
+        lambda x: _extract_numeric_param(x, ["sldist_atr_mult", "sldist_atr"])
+    )
+    work["_rr"] = work["exit_params"].apply(lambda x: _extract_numeric_param(x, ["rr"]))
+
+    work = work.loc[pd.to_numeric(work["_sldist_atr_mult"], errors="coerce").notna()].copy()
+    if work.empty:
+        return
+
+    rr_unique = sorted(set(pd.to_numeric(work["_rr"], errors="coerce").dropna().astype(float).tolist()))
+    group_cols = ["_sldist_atr_mult"] if len(rr_unique) <= 1 else ["_rr", "_sldist_atr_mult"]
+
+    rows: list[dict[str, Any]] = []
+    grouped = work.groupby(group_cols, dropna=False)
+    for key, g in grouped:
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        out: dict[str, Any] = {}
+        if len(group_cols) == 1:
+            out["sldist_atr_mult"] = float(key[0])
+        else:
+            out["rr"] = float(key[0])
+            out["sldist_atr_mult"] = float(key[1])
+
+        out["iters"] = int(len(g))
+        if "favourable" in g.columns:
+            fav_series = g["favourable"].astype(bool)
+            out["favourable_%"] = float(fav_series.mean() * 100.0)
+        else:
+            out["favourable_%"] = float("nan")
+
+        out["median_return_%"] = _median_numeric(g, "total_return_%")
+        out["median_max_dd_%"] = _median_numeric(g, "max_drawdown_abs_%")
+        out["median_mar"] = _median_numeric(g, "mar")
+        out["median_sortino"] = _median_numeric(g, "sortino")
+        out["return_iqr_%"] = _iqr_numeric(g, "total_return_%")
+
+        ret_s = pd.to_numeric(g.get("total_return_%", pd.Series(dtype=float)), errors="coerce").dropna()
+        out["negative_return_%"] = float((ret_s < 0).mean() * 100.0) if not ret_s.empty else float("nan")
+
+        rows.append(out)
+
+    rob = pd.DataFrame(rows)
+    if rob.empty:
+        return
+
+    # Composite robustness rank: high favourable/return, low drawdown/dispersion.
+    rank_cols: list[pd.Series] = []
+    for col, asc in (
+        ("favourable_%", False),
+        ("median_return_%", False),
+        ("median_max_dd_%", True),
+        ("return_iqr_%", True),
+    ):
+        s = pd.to_numeric(rob[col], errors="coerce")
+        rank_cols.append(s.rank(method="min", ascending=asc, na_option="bottom"))
+    rob["robust_rank"] = pd.concat(rank_cols, axis=1).mean(axis=1)
+    rob = rob.sort_values(["robust_rank", "iters", "favourable_%"], ascending=[True, False, False]).reset_index(drop=True)
+
+    best = rob.iloc[0]
+    if len(group_cols) == 1:
+        best_label = f"sldist_atr_mult={float(best['sldist_atr_mult']):.3f}"
+    else:
+        best_label = f"rr={float(best['rr']):.3f}, sldist_atr_mult={float(best['sldist_atr_mult']):.3f}"
+
+    st.subheader("ATR Exit Robustness")
+    if len(group_cols) == 1:
+        st.caption(
+            "Grouped by `sldist_atr_mult` to identify a stable fixed stop-distance multiplier "
+            "for entry-quality testing."
+        )
+    else:
+        st.caption(
+            "RR varies in this run, so robustness is grouped by `(rr, sldist_atr_mult)` pairs."
+        )
+    st.info(f"Suggested robust setting: `{best_label}` (lowest composite robustness rank).")
+
+    display_cols = [c for c in ["rr", "sldist_atr_mult", "iters", "favourable_%", "median_return_%", "median_max_dd_%", "median_mar", "median_sortino", "return_iqr_%", "negative_return_%", "robust_rank"] if c in rob.columns]
+    st.dataframe(rob[display_cols], use_container_width=True, hide_index=True)
+
+
+def _style_rows_by_metric(df: pd.DataFrame, metric_col: str) -> pd.io.formats.style.Styler:
+    def _row_style(row: pd.Series) -> list[str]:
+        try:
+            v = float(pd.to_numeric(pd.Series([row.get(metric_col)]), errors="coerce").iloc[0])
+        except Exception:
+            v = float("nan")
+        if pd.isna(v):
+            bg = ""
+        elif v > 0:
+            bg = "background-color: rgba(22,163,74,0.12);"
+        elif v < 0:
+            bg = "background-color: rgba(220,38,38,0.12);"
+        else:
+            bg = ""
+        return [bg] * len(row)
+
+    return df.style.apply(_row_style, axis=1)
+
+
+def _render_win_loss_dataframe(
+    df: pd.DataFrame,
+    *,
+    metric_col: str,
+    hide_index: bool = True,
+    max_styled_rows: int = 2500,
+) -> None:
+    if metric_col in df.columns and len(df) <= max_styled_rows:
+        st.dataframe(_style_rows_by_metric(df, metric_col), use_container_width=True, hide_index=hide_index)
+        return
+
+    st.dataframe(df, use_container_width=True, hide_index=hide_index)
+    if metric_col in df.columns and len(df) > max_styled_rows:
+        st.caption(
+            f"Row coloring disabled for large table ({len(df)} rows) to keep UI responsive."
+        )
 
 
 def _render_histogram(series: pd.Series, *, title: str, bins: int = 60) -> None:
@@ -474,21 +693,253 @@ def _render_histogram(series: pd.Series, *, title: str, bins: int = 60) -> None:
         st.info(f"No numeric data for: {title}")
         return
 
+    vals = s.to_numpy(dtype=float)
+    vmin = float(np.min(vals))
+    vmax = float(np.max(vals))
+    bin_count = max(int(bins), 1)
+
+    if np.isclose(vmin, vmax):
+        pad = max(abs(vmin) * 0.01, 1e-6)
+        edges = np.array([vmin - pad, vmin + pad], dtype=float)
+        bin_width = float(edges[1] - edges[0])
+    else:
+        raw_width = (vmax - vmin) / float(bin_count)
+        magnitude = 10.0 ** math.floor(math.log10(raw_width))
+        normalized = raw_width / magnitude
+        if normalized <= 1.0:
+            nice_step = 1.0
+        elif normalized <= 2.0:
+            nice_step = 2.0
+        elif normalized <= 2.5:
+            nice_step = 2.5
+        elif normalized <= 5.0:
+            nice_step = 5.0
+        else:
+            nice_step = 10.0
+        bin_width = nice_step * magnitude
+        start = math.floor(vmin / bin_width) * bin_width
+        end = math.ceil(vmax / bin_width) * bin_width
+        steps = max(int(round((end - start) / bin_width)), 1)
+        edges = start + np.arange(steps + 1, dtype=float) * bin_width
+        if edges[-1] < vmax:
+            edges = np.append(edges, edges[-1] + bin_width)
+
+    counts, _ = np.histogram(vals, bins=edges)
+    if bin_width <= 0 or not np.isfinite(bin_width):
+        precision = 4
+    elif bin_width >= 1.0:
+        precision = 2
+    else:
+        precision = int(min(8, max(2, math.ceil(-math.log10(bin_width)) + 2)))
+
+    def _fmt(x: float) -> str:
+        if abs(x) < 10 ** (-precision):
+            x = 0.0
+        return f"{x:.{precision}f}"
+
+    labels = [f"[{_fmt(edges[i])}, {_fmt(edges[i + 1])})" for i in range(len(edges) - 1)]
+    if labels:
+        labels[-1] = f"[{_fmt(edges[-2])}, {_fmt(edges[-1])}]"
+
+    hist_df = pd.DataFrame(
+        {
+            "bin": labels,
+            "bin_start": edges[:-1],
+            "bin_end": edges[1:],
+            "count": counts.astype(int),
+        }
+    )
+    st.markdown(f"**{title}**")
+    if len(hist_df) > 0:
+        st.caption(
+            f"Bin width: {bin_width:.{precision}f} ({len(hist_df)} equal intervals)"
+        )
+
     if px is not None:
-        fig = px.histogram(x=s, nbins=bins, title=title)
+        fig = px.bar(hist_df, x="bin", y="count", title=title)
+        fig.update_layout(
+            xaxis_title="Value range",
+            yaxis_title="Count",
+            xaxis={"categoryorder": "array", "categoryarray": labels},
+        )
         st.plotly_chart(fig, use_container_width=True)
         return
 
-    bucketed = pd.cut(s, bins=bins, include_lowest=True)
-    counts = bucketed.value_counts(sort=False)
-    hist_df = pd.DataFrame({"bin": counts.index.astype(str), "count": counts.values}).set_index("bin")
-    st.markdown(f"**{title}**")
+    if alt is not None:
+        chart = (
+            alt.Chart(hist_df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "bin:N",
+                    title="Value range",
+                    sort=alt.SortField(field="bin_start", order="ascending"),
+                    axis=alt.Axis(labelAngle=-90),
+                ),
+                y=alt.Y("count:Q", title="Count"),
+                tooltip=[
+                    alt.Tooltip("bin:N", title="Range"),
+                    alt.Tooltip("count:Q", title="Count"),
+                ],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        return
+
+    hist_df = hist_df[["bin_start", "count"]].set_index("bin_start")
     st.bar_chart(hist_df)
 
 
 def _safe_key_from_path(prefix: str, path: Path) -> str:
     raw = f"{prefix}_{_rel(path)}"
     return re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+
+
+def _coerce_json_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return ""
+        try:
+            return _json_pretty(json.loads(text))
+        except Exception:
+            return text
+    return _json_pretty(value)
+
+
+def _resolve_strategy_short_from_run_meta(
+    run_meta: dict[str, Any], strategy_catalog: dict[str, dict[str, Any]]
+) -> str | None:
+    spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
+    test_cfg = spec.get("test", {}) if isinstance(spec, dict) else {}
+
+    strategy_module = test_cfg.get("strategy_module")
+    strategy_tag = test_cfg.get("strategy_tag")
+
+    candidates: list[str] = []
+    if isinstance(strategy_module, str) and strategy_module.strip():
+        mod = strategy_module.strip()
+        candidates.append(mod.rsplit(".", 1)[-1])
+        candidates.append(mod)
+    if isinstance(strategy_tag, str) and strategy_tag.strip():
+        candidates.append(strategy_tag.strip())
+
+    for c in candidates:
+        if c in strategy_catalog:
+            return c
+
+    if isinstance(strategy_module, str) and strategy_module.strip():
+        for short, info in strategy_catalog.items():
+            if str(info.get("module", "")).strip() == strategy_module.strip():
+                return short
+
+    return candidates[0] if candidates else None
+
+
+def _prefill_limited_form_from_run(
+    *,
+    run_meta: dict[str, Any],
+    pass_summary: dict[str, Any],
+    strategy_catalog: dict[str, dict[str, Any]],
+) -> None:
+    spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
+    strategy_cfg = spec.get("strategy", {}) if isinstance(spec, dict) else {}
+    test_cfg = spec.get("test", {}) if isinstance(spec, dict) else {}
+    cfg = spec.get("config", {}) if isinstance(spec, dict) else {}
+
+    strategy_short = _resolve_strategy_short_from_run_meta(run_meta, strategy_catalog)
+    if strategy_short:
+        st.session_state["limited_strategy"] = strategy_short
+
+    data_raw = spec.get("data")
+    if data_raw:
+        ds = _rel(_abs_path(str(data_raw)))
+        dataset_options = [_rel(p) for p in _list_csv_data_files()]
+        if ds in dataset_options:
+            st.session_state["limited_dataset_select"] = ds
+        else:
+            st.session_state["limited_dataset_select"] = "Custom path..."
+            st.session_state["limited_dataset_custom"] = ds
+        st.session_state["limited_dataset_custom"] = ds
+
+    entry_cfg = strategy_cfg.get("entry", {}) if isinstance(strategy_cfg, dict) else {}
+    rules = entry_cfg.get("rules", []) if isinstance(entry_cfg, dict) else []
+    first_rule = rules[0] if isinstance(rules, list) and rules else {}
+    entry_plugin = first_rule.get("name") if isinstance(first_rule, dict) else None
+    entry_params = first_rule.get("params", {}) if isinstance(first_rule, dict) else {}
+
+    exit_cfg = strategy_cfg.get("exit", {}) if isinstance(strategy_cfg, dict) else {}
+    exit_plugin = exit_cfg.get("name") if isinstance(exit_cfg, dict) else None
+    exit_params = exit_cfg.get("params", {}) if isinstance(exit_cfg, dict) else {}
+
+    sizing_cfg = strategy_cfg.get("sizing", {}) if isinstance(strategy_cfg, dict) else {}
+    sizing_plugin = sizing_cfg.get("name") if isinstance(sizing_cfg, dict) else None
+    sizing_params = sizing_cfg.get("params", {}) if isinstance(sizing_cfg, dict) else {}
+
+    if entry_plugin:
+        st.session_state["limited_entry_plugin_select"] = str(entry_plugin)
+    if exit_plugin:
+        st.session_state["limited_exit_plugin_select"] = str(exit_plugin)
+    if sizing_plugin:
+        st.session_state["limited_sizing_plugin_select"] = str(sizing_plugin)
+
+    st.session_state["limited_entry_params_json"] = _coerce_json_text(entry_params)
+    st.session_state["limited_exit_params_json"] = _coerce_json_text(exit_params)
+    st.session_state["limited_sizing_params_json"] = _coerce_json_text(sizing_params)
+
+    st.session_state["limited_run_base"] = str(test_cfg.get("run_base", "") or "")
+    st.session_state["limited_test_name"] = str(test_cfg.get("test_name", "") or "")
+
+    commission_rt = cfg.get("commission_per_round_trip") if isinstance(cfg, dict) else None
+    if commission_rt is not None:
+        st.session_state["limited_commission_rt"] = str(commission_rt)
+
+    pass_threshold = test_cfg.get("pass_threshold_pct")
+    if pass_threshold is None:
+        pass_threshold = pass_summary.get("pass_threshold_%", run_meta.get("pass_threshold_%"))
+    if pass_threshold is not None and str(pass_threshold).strip() != "":
+        st.session_state["limited_pass_threshold"] = str(pass_threshold)
+
+    min_trades = test_cfg.get("min_trades")
+    if min_trades is None:
+        min_trades = pass_summary.get("min_trades", run_meta.get("min_trades"))
+    if min_trades is not None and str(min_trades).strip() != "":
+        st.session_state["limited_min_trades"] = str(min_trades)
+
+    fav_criteria = test_cfg.get("favourable_criteria", "")
+    if fav_criteria:
+        if isinstance(fav_criteria, str):
+            st.session_state["limited_favourable_criteria"] = fav_criteria
+        else:
+            st.session_state["limited_favourable_criteria"] = json.dumps(fav_criteria, separators=(",", ":"))
+
+    extra_parts: list[str] = []
+    ts_col = spec.get("ts_col")
+    if ts_col and str(ts_col).strip() and str(ts_col).strip() != "timestamp":
+        extra_parts.extend(["--ts-col", str(ts_col).strip()])
+    entry_mode = entry_cfg.get("mode") if isinstance(entry_cfg, dict) else None
+    if entry_mode and str(entry_mode).strip() and str(entry_mode).strip() != "all":
+        extra_parts.extend(["--entry-mode", str(entry_mode).strip()])
+    vote_k = entry_cfg.get("vote_k") if isinstance(entry_cfg, dict) else None
+    if vote_k is not None and str(vote_k).strip() != "":
+        extra_parts.extend(["--vote-k", str(vote_k)])
+    lot_size = cfg.get("lot_size") if isinstance(cfg, dict) else None
+    if lot_size is not None and str(lot_size).strip() != "":
+        extra_parts.extend(["--lot-size", str(lot_size)])
+    st.session_state["limited_extra_args"] = " ".join(shlex.quote(str(x)) for x in extra_parts)
+
+    # These are expansion helpers; exact seed grids are already captured in params JSON.
+    st.session_state["limited_seed_count"] = ""
+    st.session_state["limited_seed_start"] = ""
+    st.session_state["limited_exit_seed_count"] = ""
+    st.session_state["limited_exit_seed_start"] = ""
+
+    # Keep template UI stable while using explicit prefilled values.
+    st.session_state["limited_test_template"] = "Core"
+    st.session_state["_limited_prefill_lock"] = True
 
 
 def _render_saved_interactive_html(path: Path) -> None:
@@ -767,6 +1218,14 @@ def _render_walkforward_results(run_dir: Path) -> None:
             ("Initial Review", _status_label(ir_all_pass), "{}"),
         ]
     )
+    _render_metric_row(
+        [
+            ("Win Rate %", _as_float(agg.get("win_rate_%", float("nan"))), "{:.2f}"),
+            ("CAGR %", _as_float(agg.get("cagr_%", float("nan"))), "{:.2f}"),
+            ("MAR", _as_float(agg.get("mar", float("nan"))), "{:.3f}"),
+            ("Sortino", _as_float(agg.get("sortino", float("nan"))), "{:.3f}"),
+        ]
+    )
     st.caption(f"Optimization mode: `{optimization_mode}` | Selection mode: `{selection_mode}`")
 
     def _money(v: Any) -> str:
@@ -889,7 +1348,7 @@ def _render_walkforward_results(run_dir: Path) -> None:
         },
     ]
     initial_df, initial_ok = _criteria_table(initial_rows)
-    st.markdown(f"**Initial Review Status: {_status_label(initial_ok)}**")
+    _render_status_badge("Initial Review", initial_ok)
     st.dataframe(initial_df, use_container_width=True, hide_index=True)
 
     is_bars = int(config.get("is_bars", 0))
@@ -942,7 +1401,7 @@ def _render_walkforward_results(run_dir: Path) -> None:
         },
     ]
     execution_df, execution_ok = _criteria_table(execution_rows)
-    st.markdown(f"**Execution Checks Status: {_status_label(execution_ok)}**")
+    _render_status_badge("Execution Checks", execution_ok)
     st.dataframe(execution_df, use_container_width=True, hide_index=True)
 
     if bool(summary.get("baseline_included")) and pd.notna(wf_objective) and pd.notna(baseline_objective):
@@ -988,13 +1447,18 @@ def _render_walkforward_results(run_dir: Path) -> None:
             "oos_trades",
             "oos_total_return_%",
             "oos_max_drawdown_abs_%",
+            "oos_win_rate_%",
+            "oos_cagr_%",
+            "oos_mar",
+            "oos_sortino",
             "oos_return_on_account",
             "wfe_pct",
             "wfe_pass",
             "oos_min_trades_met",
         ]
         existing = [c for c in view_cols if c in folds.columns]
-        st.dataframe(folds[existing] if existing else folds, use_container_width=True)
+        fold_view = folds[existing] if existing else folds
+        _render_win_loss_dataframe(fold_view, metric_col="oos_total_return_%", hide_index=True)
 
     html_path = run_dir / "oos_equity_interactive.html"
     if html_path.exists():
@@ -1026,6 +1490,14 @@ def _render_mc_results(mc_run_dir: Path) -> None:
             ),
         ]
     )
+    _render_metric_row(
+        [
+            ("Median Win Rate %", _as_float(metrics.get("median_win_rate_%", float("nan"))), "{:.2f}"),
+            ("Median CAGR %", _as_float(metrics.get("median_cagr_%", float("nan"))), "{:.2f}"),
+            ("Median MAR", _as_float(metrics.get("median_mar", float("nan"))), "{:.3f}"),
+            ("Median Sortino", _as_float(metrics.get("median_sortino", float("nan"))), "{:.3f}"),
+        ]
+    )
 
     criteria_rows = [
         {
@@ -1055,7 +1527,7 @@ def _render_mc_results(mc_run_dir: Path) -> None:
     ]
 
     criteria_df, criteria_ok = _criteria_table(criteria_rows)
-    st.markdown(f"**Overall Status: {_status_label(criteria_ok)}**")
+    _render_status_badge("Overall Status", criteria_ok)
     st.dataframe(criteria_df, use_container_width=True, hide_index=True)
 
     sims_path = mc_run_dir / "mc_simulations.csv"
@@ -1066,6 +1538,24 @@ def _render_mc_results(mc_run_dir: Path) -> None:
             _render_histogram(sims["return_%"], title="Return % Distribution", bins=70)
         if "max_drawdown_%" in sims.columns:
             _render_histogram(sims["max_drawdown_%"], title="Max Drawdown % Distribution", bins=70)
+        st.subheader("Simulation Outcomes")
+        sim_cols = [
+            c
+            for c in [
+                "sim",
+                "return_%",
+                "max_drawdown_%",
+                "win_rate_%",
+                "cagr_%",
+                "mar",
+                "sortino",
+                "ruin_hit",
+                "final_equity",
+            ]
+            if c in sims.columns
+        ]
+        sims_view = sims[sim_cols] if sim_cols else sims
+        _render_win_loss_dataframe(sims_view, metric_col="return_%", hide_index=True)
 
     q_path = mc_run_dir / "mc_paths_quantiles.csv"
     if q_path.exists():
@@ -1084,7 +1574,7 @@ def _render_mc_results(mc_run_dir: Path) -> None:
         _render_saved_interactive_html(html_path)
 
 
-def _render_limited_results(run_dir: Path) -> None:
+def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[str, Any]]) -> None:
     results_path = run_dir / "limited_results.csv"
     trades_path = run_dir / "limited_trades.csv"
     pass_path = run_dir / "pass_summary.json"
@@ -1101,20 +1591,55 @@ def _render_limited_results(run_dir: Path) -> None:
     favourable_pct = _as_float(pass_summary.get("favourable_pct", 0.0))
     pass_threshold = _as_float(pass_summary.get("pass_threshold_%", 0.0))
     min_trades = int(pass_summary.get("min_trades", run_meta.get("min_trades", 0)))
+    criteria_cfg = run_meta.get("criteria", {"mode": "all", "rules": []})
+    mode = str(criteria_cfg.get("mode", "all"))
+    rules = criteria_cfg.get("rules", [])
 
     st.subheader("Limited Test Result")
+    c_rerun, _ = st.columns([0.2, 0.8])
+    rerun_key = f"limited_rerun_{_safe_key_from_path('run', run_dir)}"
+    if c_rerun.button("Rerun Test", key=rerun_key):
+        try:
+            _prefill_limited_form_from_run(
+                run_meta=run_meta,
+                pass_summary=pass_summary,
+                strategy_catalog=strategy_catalog,
+            )
+            st.session_state["_force_nav_page"] = "run_tests"
+            st.rerun()
+        except Exception as e:
+            st.error(f"Unable to prefill rerun form: {e}")
+
     _render_metric_row(
         [
             ("Favourable %", favourable_pct, "{:.2f}"),
             ("Pass Threshold %", pass_threshold, "{:.2f}"),
             ("Iterations", int(pass_summary.get("total_iters", len(results))), "{:d}"),
-            ("Passed", _status_label(bool(pass_summary.get("passed", False))), "{}"),
         ]
     )
-
-    criteria_cfg = run_meta.get("criteria", {"mode": "all", "rules": []})
-    mode = str(criteria_cfg.get("mode", "all"))
-    rules = criteria_cfg.get("rules", [])
+    _render_status_badge("Run Pass Threshold (Favourable %)", bool(pass_summary.get("passed", False)))
+    if isinstance(rules, list) and rules:
+        rule_text = "; ".join(
+            f"{str(r.get('metric', '?'))} {str(r.get('op', '?'))} {str(r.get('value', '?'))}"
+            for r in rules
+            if isinstance(r, dict)
+        )
+    else:
+        rule_text = "no criteria rules found"
+    st.caption(
+        "Pass-threshold metric: `favourable %` = % of iterations where "
+        f"`trades >= {min_trades}` and criteria mode `{mode}` is satisfied "
+        f"(`{rule_text}`). Final pass requires `favourable % >= {pass_threshold:.2f}%`."
+    )
+    _render_metric_row(
+        [
+            ("Median Win Rate %", _median_numeric(results, "win_rate_%"), "{:.2f}"),
+            ("Median CAGR %", _median_numeric(results, "cagr_%"), "{:.2f}"),
+            ("Median MAR", _median_numeric(results, "mar"), "{:.3f}"),
+            ("Median Sortino", _median_numeric(results, "sortino"), "{:.3f}"),
+        ]
+    )
+    _render_limited_atr_robustness(results)
 
     criteria_rows: list[dict[str, Any]] = [
         {
@@ -1160,7 +1685,7 @@ def _render_limited_results(run_dir: Path) -> None:
         )
 
     criteria_df, criteria_ok = _criteria_table(criteria_rows)
-    st.markdown(f"**Overall Status: {_status_label(criteria_ok)}**")
+    _render_status_badge("Overall Status", criteria_ok)
     st.dataframe(criteria_df, use_container_width=True, hide_index=True)
 
     st.subheader("Distribution")
@@ -1180,12 +1705,16 @@ def _render_limited_results(run_dir: Path) -> None:
             "max_drawdown_abs_%",
             "profit_factor",
             "win_rate_%",
+            "cagr_%",
+            "mar",
+            "sortino",
             "entry_params",
             "exit_params",
         ]
         if c in results.columns
     ]
-    st.dataframe(results[iter_cols] if iter_cols else results, use_container_width=True)
+    iter_view = results[iter_cols] if iter_cols else results
+    _render_win_loss_dataframe(iter_view, metric_col="total_return_%", hide_index=True)
 
     if trades_path.exists():
         trades = pd.read_csv(trades_path)
@@ -1214,6 +1743,14 @@ def _render_limited_results(run_dir: Path) -> None:
                             ("Trades", trades_n, "{:d}"),
                             ("Return %", float(r.get("total_return_%", float("nan"))), "{:.2f}"),
                             ("Max DD %", float(r.get("max_drawdown_abs_%", float("nan"))), "{:.2f}"),
+                        ]
+                    )
+                    _render_metric_row(
+                        [
+                            ("Win Rate %", float(r.get("win_rate_%", float("nan"))), "{:.2f}"),
+                            ("CAGR %", float(r.get("cagr_%", float("nan"))), "{:.2f}"),
+                            ("MAR", float(r.get("mar", float("nan"))), "{:.3f}"),
+                            ("Sortino", float(r.get("sortino", float("nan"))), "{:.3f}"),
                         ]
                     )
 
@@ -1246,7 +1783,40 @@ def _render_limited_results(run_dir: Path) -> None:
                         ]
                         if c in trades_iter.columns
                     ]
-                    st.dataframe(trades_iter[trade_cols] if trade_cols else trades_iter, use_container_width=True)
+                    trades_view = trades_iter[trade_cols] if trade_cols else trades_iter
+                    _render_win_loss_dataframe(trades_view, metric_col="pnl", hide_index=True, max_styled_rows=5000)
+
+                st.markdown("**Iteration Candle Overlay**")
+                iter_chart_path = run_dir / f"iteration_{int(selected_iter)}_lightweight.html"
+                build_key = f"limited_build_iter_chart_{run_dir.as_posix()}_{int(selected_iter)}"
+                if st.button("Build / Refresh Lightweight Chart", key=build_key):
+                    cmd = [
+                        SCRIPT_PYTHON,
+                        str(SCRIPTS_DIR / "plot_limited_iteration_lightweight.py"),
+                        "--run-dir",
+                        run_dir.as_posix(),
+                        "--iter",
+                        str(int(selected_iter)),
+                        "--max-bars",
+                        "3000",
+                        "--max-liq-lines",
+                        "0",
+                        "--max-visible-liq-lines",
+                        "180",
+                    ]
+                    rc, out = _run_cli_live(cmd, workflow="limited")
+                    if rc == 0:
+                        parsed = _extract_path_after_marker(out, "Saved lightweight chart:")
+                        if parsed is not None:
+                            iter_chart_path = parsed
+                        st.success(f"Generated lightweight chart: `{_rel(iter_chart_path)}`")
+                    else:
+                        st.error("Failed to generate iteration lightweight chart.")
+
+                if iter_chart_path.exists():
+                    _render_saved_interactive_html(iter_chart_path)
+                else:
+                    st.info("No lightweight chart generated yet. Click 'Build / Refresh Lightweight Chart'.")
             else:
                 st.info("No iteration ids available in results.")
         else:
@@ -1324,11 +1894,15 @@ def _render_reference_page(strategy_catalog: dict[str, dict[str, Any]], plugin_c
 
 
 def main() -> None:
-    st.set_page_config(page_title="QuantBT Streamlit Frontend", layout="wide")
+    st.set_page_config(
+        page_title="QuantBT Streamlit Frontend",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     st.title("QuantBT Streamlit Frontend")
-    st.caption(f"Script interpreter: `{SCRIPT_PYTHON}`")
-
-    if st.sidebar.button("Refresh discovered metadata"):
+    c_meta, c_refresh = st.columns([0.8, 0.2])
+    c_meta.caption(f"Script interpreter: `{SCRIPT_PYTHON}`")
+    if c_refresh.button("Refresh discovered metadata"):
         st.cache_data.clear()
         st.rerun()
 
@@ -1373,6 +1947,15 @@ def main() -> None:
 
     nav_key = "nav_page"
     last_qp_key = "_last_nav_qp_page"
+    forced_page = st.session_state.pop("_force_nav_page", None)
+    if forced_page in keys:
+        requested_page = str(forced_page)
+        st.session_state[nav_key] = requested_page
+        st.session_state[last_qp_key] = requested_page
+        try:
+            st.query_params["page"] = requested_page
+        except Exception:
+            pass
 
     if nav_key not in st.session_state or st.session_state[nav_key] not in keys:
         st.session_state[nav_key] = requested_page
@@ -1758,6 +2341,19 @@ def main() -> None:
                 ],
             }
             similar_entry_criteria = {"total_return_%": {">": 0}}
+            liqsweep_entry_grid = {
+                "atr_dist_for_liq_generation": [0.8, 1.0, 1.2],
+                "htf": ["30", "60"],
+                "liq_move_away_atr": [2.5, 3.0],
+                "max_rr": [4.0, 6.0, 8.0],
+                "min_rr": 1.0,
+            }
+            fixed_template_entry_plugin = (entry_default_name or default_entry)
+
+            def _fixed_template_entry_params() -> dict[str, Any]:
+                if fixed_template_entry_plugin == "interequity_liqsweep_entry":
+                    return copy.deepcopy(liqsweep_entry_grid)
+                return _strategy_default_entry_params()
 
             preset_defs: dict[str, dict[str, Any]] = {
                 "Core": {
@@ -1775,10 +2371,10 @@ def main() -> None:
                     "pass_threshold": "",
                 },
                 "Fixed ATR Exit": {
-                    "entry_plugin": "sma_cross",
-                    "entry_params": {"fast": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100], "slow": [100, 125, 150, 175, 200, 225, 250, 275, 300, 325]},
+                    "entry_plugin": fixed_template_entry_plugin,
+                    "entry_params": _fixed_template_entry_params(),
                     "exit_plugin": "atr_brackets",
-                    "exit_params": {"rr": 2.0, "sldist_atr_mult": 1.5, "atr_period": 14},
+                    "exit_params": copy.deepcopy(DEFAULT_EXIT_PARAMS.get("atr_brackets", {"rr": [1.5, 2.0, 2.5], "sldist_atr_mult": [1.0, 1.5], "atr_period": 14})),
                     "seed_count": "",
                     "seed_start": "",
                     "exit_seed_count": "",
@@ -1787,10 +2383,10 @@ def main() -> None:
                     "pass_threshold": "",
                 },
                 "Fixed Bar Exit": {
-                    "entry_plugin": "sma_cross",
-                    "entry_params": {"fast": [20, 30, 40, 50, 60, 70, 80], "slow": [125, 150, 175, 200, 225, 250, 275, 300, 325, 350]},
+                    "entry_plugin": fixed_template_entry_plugin,
+                    "entry_params": _fixed_template_entry_params(),
                     "exit_plugin": "time_exit",
-                    "exit_params": {"hold_bars": [1]},
+                    "exit_params": copy.deepcopy(DEFAULT_EXIT_PARAMS.get("time_exit", {"hold_bars": [1]})),
                     "seed_count": "",
                     "seed_start": "",
                     "exit_seed_count": "",
@@ -1890,7 +2486,11 @@ def main() -> None:
             strategy_track_key = "_limited_last_template_strategy"
             template_changed = st.session_state.get(preset_track_key) != preset_label
             strategy_changed = st.session_state.get(strategy_track_key) != strategy_short
-            if template_changed or strategy_changed:
+            prefill_lock = bool(st.session_state.pop("_limited_prefill_lock", False))
+            if prefill_lock:
+                st.session_state[preset_track_key] = preset_label
+                st.session_state[strategy_track_key] = strategy_short
+            elif template_changed or strategy_changed:
                 _apply_limited_template(preset_label)
                 st.session_state[preset_track_key] = preset_label
                 st.session_state[strategy_track_key] = strategy_short
@@ -2239,7 +2839,7 @@ def main() -> None:
             default = st.session_state["last_limited_run"] or (options[0] if options else "")
             run_dir_raw = _select_path_from_options("Limited run", options, default, key_prefix="res_limited")
             if run_dir_raw.strip():
-                _render_limited_results(_abs_path(run_dir_raw.strip()))
+                _render_limited_results(_abs_path(run_dir_raw.strip()), strategy_catalog=strategy_catalog)
             else:
                 st.info("No limited run selected.")
 

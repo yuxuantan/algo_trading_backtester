@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from quantbt.core.metrics import max_drawdown, profit_factor
+from quantbt.core.performance import common_performance_metrics
 
 @dataclass(frozen=True)
 class BacktestConfig:
@@ -173,4 +174,11 @@ def run_backtest_sma_cross(
         "profit_factor": pf,
         "avg_R": avg_r
     }
+    summary.update(
+        common_performance_metrics(
+            equity_like=equity_df,
+            trades_df=trades_df,
+            initial_equity=float(cfg.initial_equity),
+        )
+    )
     return equity_df, trades_df, summary

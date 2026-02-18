@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from quantbt.core.engine import BacktestConfig, run_backtest_sma_cross
+from quantbt.core.performance import common_performance_metrics
 from quantbt.experiments.runners import make_run_dir
 from quantbt.io.dataio import load_ohlc_csv
 from quantbt.io.datasets import dataset_tag_for_runs, read_dataset_meta, sha256_file
@@ -169,6 +170,14 @@ def evaluate_on_slice(
     except Exception:
         return None
 
+    summary = dict(summary or {})
+    summary.update(
+        common_performance_metrics(
+            equity_like=equity_df,
+            trades_df=trades_df,
+            initial_equity=float(cfg.initial_equity),
+        )
+    )
     summary = enrich_summary_with_fitness(
         summary,
         equity_df=equity_df,
@@ -882,6 +891,13 @@ def run_walkforward(
         initial_equity=agg_initial,
         margin_rate=margin_rate,
         required_margin_abs_override=required_margin_abs,
+    )
+    agg_summary.update(
+        common_performance_metrics(
+            equity_like=oos_equity_df,
+            trades_df=oos_trades_df,
+            initial_equity=float(agg_initial),
+        )
     )
     initial_review = build_initial_review_report(
         equity_df=oos_equity_df,

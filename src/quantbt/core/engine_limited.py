@@ -4,6 +4,7 @@ import inspect
 import numpy as np
 import pandas as pd
 from quantbt.core.metrics import max_drawdown
+from quantbt.core.performance import common_performance_metrics
 
 
 def run_backtest_limited(
@@ -40,6 +41,69 @@ def run_backtest_limited(
         supports_entry = "entry" in inspect.signature(build_exit_fn).parameters
     except (TypeError, ValueError):
         supports_entry = False
+
+    def _close_trade(
+        *,
+        pos: dict,
+        side: str,
+        entry: float,
+        units: float,
+        exit_price: float,
+        exit_reason: str,
+        exit_time,
+        i: int,
+        equity_now: float,
+    ) -> tuple[float, dict]:
+        commission = 0.0
+        if cfg.commission_per_round_trip and cfg.lot_size:
+            commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
+        if side == "long":
+            entry_eff = entry + spread / 2
+            exit_eff = exit_price - spread / 2
+            pnl = (exit_eff - entry_eff) * units - commission
+        else:
+            entry_eff = entry - spread / 2
+            exit_eff = exit_price + spread / 2
+            pnl = (entry_eff - exit_eff) * units - commission
+
+        equity_after = equity_now + pnl
+
+        mfe = float(pos.get("mfe", 0.0))
+        mae = float(pos.get("mae", 0.0))
+        stop_dist = pos.get("stop_dist")
+        mfe_r = (mfe / stop_dist) if stop_dist else np.nan
+        mae_r = (mae / stop_dist) if stop_dist else np.nan
+        mfe_dollars = mfe * units
+        if mfe_dollars > 0:
+            realized = max(pnl, 0.0)
+            giveback = (mfe_dollars - realized) / mfe_dollars
+        else:
+            giveback = np.nan
+
+        trade = {
+            "entry_time": pos["entry_time"],
+            "exit_time": exit_time,
+            "bars_held": int(i - int(pos.get("entry_i", i))),
+            "side": side,
+            "entry": entry,
+            "exit": exit_price,
+            # Persist realized bracket levels from the actual limited-test iteration.
+            # For non-bracket exits (e.g. time-based), these remain NaN.
+            "sl": float(pos["sl"]) if "sl" in pos else np.nan,
+            "tp": float(pos["tp"]) if "tp" in pos else np.nan,
+            "stop_dist": float(pos["stop_dist"]) if pos.get("stop_dist") is not None else np.nan,
+            "exit_reason": exit_reason,
+            "units": units,
+            "pnl": pnl,
+            "commission": commission,
+            "mfe": mfe,
+            "mae": mae,
+            "mfe_R": mfe_r,
+            "mae_R": mae_r,
+            "giveback": giveback,
+            "equity_after": equity_after,
+        }
+        return float(equity_after), trade
 
     for i in range(len(df)):
         t = idx[i]
@@ -87,50 +151,18 @@ def run_backtest_limited(
                     exit_reason = "TP"
 
             if exit_price is not None:
-                commission = 0.0
-                if cfg.commission_per_round_trip and cfg.lot_size:
-                    commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
-                if side == "long":
-                    entry_eff = entry + spread / 2
-                    exit_eff = exit_price - spread / 2
-                    pnl = (exit_eff - entry_eff) * units - commission
-                else:
-                    entry_eff = entry - spread / 2
-                    exit_eff = exit_price + spread / 2
-                    pnl = (entry_eff - exit_eff) * units - commission
-
-                equity += pnl
-
-                mfe = float(pos.get("mfe", 0.0))
-                mae = float(pos.get("mae", 0.0))
-                stop_dist = pos.get("stop_dist")
-                mfe_r = (mfe / stop_dist) if stop_dist else np.nan
-                mae_r = (mae / stop_dist) if stop_dist else np.nan
-                mfe_dollars = mfe * units
-                if mfe_dollars > 0:
-                    realized = max(pnl, 0.0)
-                    giveback = (mfe_dollars - realized) / mfe_dollars
-                else:
-                    giveback = np.nan
-
-                trades.append({
-                    "entry_time": pos["entry_time"],
-                    "exit_time": t,
-                    "bars_held": int(i - int(pos.get("entry_i", i))),
-                    "side": side,
-                    "entry": entry,
-                    "exit": exit_price,
-                    "exit_reason": exit_reason,
-                    "units": units,
-                    "pnl": pnl,
-                    "commission": commission,
-                    "mfe": mfe,
-                    "mae": mae,
-                    "mfe_R": mfe_r,
-                    "mae_R": mae_r,
-                    "giveback": giveback,
-                    "equity_after": equity,
-                })
+                equity, trade = _close_trade(
+                    pos=pos,
+                    side=side,
+                    entry=entry,
+                    units=units,
+                    exit_price=exit_price,
+                    exit_reason=str(exit_reason),
+                    exit_time=t,
+                    i=i,
+                    equity_now=float(equity),
+                )
+                trades.append(trade)
                 pos = None
 
         equity_curve.append({"time": t, "equity": equity})
@@ -218,6 +250,52 @@ def run_backtest_limited(
                         "stop_dist": stop_dist,
                     }
 
+                    # Evaluate bracket exits on the entry bar itself using wick logic.
+                    # If both SL/TP are hit on the same bar, apply the same pessimistic
+                    # rule used elsewhere when cfg.conservative_same_bar is enabled.
+                    sl = pos["sl"]
+                    tp = pos["tp"]
+                    if side == "long":
+                        pos["mfe"] = max(pos["mfe"], h - entry_open)
+                        pos["mae"] = min(pos["mae"], l - entry_open)
+                        sl_hit = (l <= sl)
+                        tp_hit = (h >= tp)
+                    else:
+                        pos["mfe"] = max(pos["mfe"], entry_open - l)
+                        pos["mae"] = min(pos["mae"], entry_open - h)
+                        sl_hit = (h >= sl)
+                        tp_hit = (l <= tp)
+
+                    exit_price = None
+                    exit_reason = None
+                    if sl_hit and tp_hit:
+                        exit_price = sl if cfg.conservative_same_bar else tp
+                        exit_reason = "SL_and_TP_same_bar"
+                    elif sl_hit:
+                        exit_price = sl
+                        exit_reason = "SL"
+                    elif tp_hit:
+                        exit_price = tp
+                        exit_reason = "TP"
+
+                    if exit_price is not None:
+                        equity, trade = _close_trade(
+                            pos=pos,
+                            side=side,
+                            entry=float(entry_open),
+                            units=float(pos["units"]),
+                            exit_price=float(exit_price),
+                            exit_reason=str(exit_reason),
+                            exit_time=t,
+                            i=i,
+                            equity_now=float(equity),
+                        )
+                        trades.append(trade)
+                        pos = None
+                        # Keep equity curve aligned for the same bar where entry+exit occurred.
+                        if equity_curve:
+                            equity_curve[-1]["equity"] = equity
+
     equity_df = pd.DataFrame(equity_curve).set_index("time")
     trades_df = pd.DataFrame(trades)
 
@@ -266,4 +344,11 @@ def run_backtest_limited(
         "avg_mae_R": avg_mae_r,
         "avg_giveback": avg_giveback,
     }
+    summary.update(
+        common_performance_metrics(
+            equity_like=equity_df,
+            trades_df=trades_df,
+            initial_equity=float(cfg.initial_equity),
+        )
+    )
     return equity_df, trades_df, summary

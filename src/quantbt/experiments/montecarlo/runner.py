@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quantbt.core.performance import cagr_pct, sortino_ratio_from_returns, years_from_index
+
 
 def _read_json(path: Path) -> dict:
     if not path.exists():
@@ -94,6 +96,8 @@ def _simulate_path(
     initial_equity: float,
     ruin_equity: float,
     stop_at_ruin: bool,
+    sim_years: float,
+    trades_per_year: float,
 ) -> tuple[dict, np.ndarray]:
     equity = float(initial_equity)
     peak = float(initial_equity)
@@ -136,6 +140,20 @@ def _simulate_path(
     ret_pct = ((equity / float(initial_equity)) - 1.0) * 100.0
     max_dd_pct = (max_dd_abs / float(initial_equity)) * 100.0 if initial_equity > 0 else np.nan
     return_dd_ratio = ret_pct / max_dd_pct if max_dd_pct > 0 else np.nan
+    win_rate_pct = float((trade_pnls > 0).mean() * 100.0) if n_trades > 0 else np.nan
+
+    cagr = cagr_pct(float(initial_equity), float(equity), float(sim_years))
+    mar = float(cagr / max_dd_pct) if np.isfinite(cagr) and np.isfinite(max_dd_pct) and max_dd_pct > 0 else np.nan
+
+    prev_equity = path[:-1]
+    rets = np.full(n_trades, np.nan, dtype=float)
+    np.divide(
+        trade_pnls,
+        prev_equity,
+        out=rets,
+        where=np.isfinite(prev_equity) & (prev_equity > 0),
+    )
+    sortino = sortino_ratio_from_returns(rets, periods_per_year=float(trades_per_year))
 
     summary = {
         "final_equity": float(equity),
@@ -143,6 +161,10 @@ def _simulate_path(
         "max_drawdown_abs": float(max_dd_abs),
         "max_drawdown_%": float(max_dd_pct),
         "return_drawdown_ratio": float(return_dd_ratio) if np.isfinite(return_dd_ratio) else np.nan,
+        "win_rate_%": float(win_rate_pct) if np.isfinite(win_rate_pct) else np.nan,
+        "cagr_%": float(cagr) if np.isfinite(cagr) else np.nan,
+        "sortino": float(sortino) if np.isfinite(sortino) else np.nan,
+        "mar": float(mar) if np.isfinite(mar) else np.nan,
         "worst_equity": float(trough),
         "ruin_hit": bool(ruin_hit),
         "ruin_trade_n": int(ruin_trade_n) if ruin_trade_n is not None else np.nan,
@@ -207,6 +229,26 @@ def run_monte_carlo(
     if sim_trades <= 0:
         raise ValueError("n_trades must be > 0")
 
+    eq_path = run_dir / "oos_equity_curve.csv"
+    historical_years = float("nan")
+    if eq_path.exists():
+        try:
+            eq_df = pd.read_csv(eq_path)
+            if "time" in eq_df.columns:
+                ts = pd.to_datetime(eq_df["time"], utc=True, errors="coerce").dropna()
+                if not ts.empty:
+                    historical_years = years_from_index(pd.DatetimeIndex(ts))
+        except Exception:
+            historical_years = float("nan")
+
+    base_trade_count = max(int(len(pool)), 1)
+    if np.isfinite(historical_years) and historical_years > 0:
+        sim_years = float(historical_years * (float(sim_trades) / float(base_trade_count)))
+        trades_per_year = float(sim_trades / sim_years) if sim_years > 0 else float("nan")
+    else:
+        sim_years = float("nan")
+        trades_per_year = float("nan")
+
     rng = np.random.default_rng(int(seed))
     rows = []
     sample_paths: list[tuple[int, np.ndarray]] = []
@@ -224,6 +266,8 @@ def run_monte_carlo(
             initial_equity=initial_equity,
             ruin_equity=ruin_equity,
             stop_at_ruin=stop_at_ruin,
+            sim_years=sim_years,
+            trades_per_year=trades_per_year,
         )
         rows.append({"sim": i, **res})
         if quantile_matrix is not None:
@@ -267,6 +311,10 @@ def run_monte_carlo(
     median_max_dd_pct = _finite_median(sims_df["max_drawdown_%"])
     median_return_pct = _finite_median(sims_df["return_%"])
     median_ratio_direct = _finite_median(sims_df["return_drawdown_ratio"])
+    median_win_rate_pct = _finite_median(sims_df["win_rate_%"])
+    median_cagr_pct = _finite_median(sims_df["cagr_%"])
+    median_sortino = _finite_median(sims_df["sortino"])
+    median_mar = _finite_median(sims_df["mar"])
     ratio_of_medians = (
         float(median_return_pct / median_max_dd_pct)
         if np.isfinite(median_return_pct) and np.isfinite(median_max_dd_pct) and median_max_dd_pct > 0
@@ -299,6 +347,8 @@ def run_monte_carlo(
             "fixed_risk_dollars": fixed_risk_dollars,
             "initial_equity": float(initial_equity),
             "ruin_equity": float(ruin_equity),
+            "historical_years": float(historical_years) if np.isfinite(historical_years) else float("nan"),
+            "sim_years": float(sim_years) if np.isfinite(sim_years) else float("nan"),
             "stop_at_ruin": bool(stop_at_ruin),
             "save_sample_paths_count": int(save_sample_paths_count),
             "save_quantile_paths": bool(save_quantile_paths),
@@ -309,11 +359,24 @@ def run_monte_carlo(
             "median_return_%": median_return_pct,
             "return_drawdown_ratio_median_of_ratios": median_ratio_direct,
             "return_drawdown_ratio_ratio_of_medians": ratio_of_medians,
+            "median_win_rate_%": median_win_rate_pct,
+            "median_cagr_%": median_cagr_pct,
+            "median_sortino": median_sortino,
+            "median_mar": median_mar,
             "max_pain_worst_equity_p5": _finite_quantile(sims_df["worst_equity"], 0.05),
             "max_drawdown_%_p95": _finite_quantile(sims_df["max_drawdown_%"], 0.95),
             "return_%_p05": _finite_quantile(sims_df["return_%"], 0.05),
             "return_%_p50": _finite_quantile(sims_df["return_%"], 0.50),
             "return_%_p95": _finite_quantile(sims_df["return_%"], 0.95),
+            "cagr_%_p05": _finite_quantile(sims_df["cagr_%"], 0.05),
+            "cagr_%_p50": _finite_quantile(sims_df["cagr_%"], 0.50),
+            "cagr_%_p95": _finite_quantile(sims_df["cagr_%"], 0.95),
+            "sortino_p05": _finite_quantile(sims_df["sortino"], 0.05),
+            "sortino_p50": _finite_quantile(sims_df["sortino"], 0.50),
+            "sortino_p95": _finite_quantile(sims_df["sortino"], 0.95),
+            "mar_p05": _finite_quantile(sims_df["mar"], 0.05),
+            "mar_p50": _finite_quantile(sims_df["mar"], 0.50),
+            "mar_p95": _finite_quantile(sims_df["mar"], 0.95),
         },
         "thresholds": thresholds,
         "threshold_checks": checks,
@@ -325,6 +388,9 @@ def run_monte_carlo(
         f"risk_of_ruin={risk_of_ruin_pct:.2f}% "
         f"median_dd={median_max_dd_pct:.2f}% "
         f"median_return={median_return_pct:.2f}% "
+        f"median_cagr={median_cagr_pct:.2f}% "
+        f"median_sortino={median_sortino:.3f} "
+        f"median_mar={median_mar:.3f} "
         f"ratio_of_medians={ratio_of_medians:.3f}",
         flush=True,
     )
