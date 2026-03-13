@@ -36,6 +36,7 @@ STATE_LABEL = {
     1: "purple",
     2: "red",
 }
+ST_BLACK = 0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -159,14 +160,20 @@ def _segments_from_events(events: list[dict[str, Any]], fallback_end: pd.Timesta
         key = (pool, line_id)
         if ev_type == "line_created":
             lvl = float(ev.get("level"))
-            st = int(ev.get("state", 0))
+            st = int(ev.get("state", ST_BLACK))
+            pivot_t = t
+            confirm_t = _to_ts_utc(ev.get("confirm_time"))
+            if confirm_t is None:
+                confirm_t = pivot_t
+            if confirm_t < pivot_t:
+                confirm_t = pivot_t
             records[key] = {
                 "pool": pool,
                 "line_id": line_id,
                 "level": lvl,
-                "start": t,
-                "state": st,
-                "changes": [],
+                "start": pivot_t,
+                "state": ST_BLACK,
+                "changes": ([(confirm_t, st)] if st != ST_BLACK or confirm_t > pivot_t else []),
                 "end": None,
             }
             continue
@@ -304,25 +311,33 @@ def _prepare_liq_segments(
     include_black_lines: bool,
     max_liq_lines: int,
 ) -> list[dict[str, Any]]:
+    colored_lines = {
+        (str(seg.get("pool", "")), int(seg.get("line_id", -1)))
+        for seg in line_segments
+        if int(seg.get("state", ST_BLACK)) != ST_BLACK
+    }
+
     filtered: list[dict[str, Any]] = []
     for seg in line_segments:
         state = int(seg.get("state", 0))
-        if state == 0 and not include_black_lines:
+        line_key = (str(seg.get("pool", "")), int(seg.get("line_id", -1)))
+        keep_black_for_colored_line = state == ST_BLACK and line_key in colored_lines
+        if state == ST_BLACK and not include_black_lines and not keep_black_for_colored_line:
             continue
 
         s0 = pd.Timestamp(seg.get("start"))
         s1 = pd.Timestamp(seg.get("end"))
-        s_draw = pd.Timestamp(seg.get("origin_start", s0))
         if s1 < window_start or s0 > window_end:
             continue
 
+        x0 = max(s0, window_start)
         x1 = min(s1, window_end)
-        if x1 <= s0:
+        if x1 <= x0:
             continue
 
         item = dict(seg)
-        item["start"] = s_draw
-        item["active_start"] = s0
+        item["start"] = x0
+        item["active_start"] = x0
         item["end"] = x1
         filtered.append(item)
 
@@ -422,7 +437,6 @@ def _normalize_trades_for_plot(trades: pd.DataFrame) -> pd.DataFrame:
 def _build_payload(
     *,
     chart_df: pd.DataFrame,
-    trades_iter: pd.DataFrame,
     bt_trades: pd.DataFrame,
     line_segments: list[dict[str, Any]],
     title: str,
@@ -449,7 +463,7 @@ def _build_payload(
         )
     initial_start_idx, initial_end_idx = _initial_window_bounds(
         chart_df,
-        trades_iter,
+        bt_trades,
         initial_bars=initial_bars,
     )
 
@@ -459,9 +473,7 @@ def _build_payload(
     trade_columns: list[str] = []
     trade_rows: list[dict[str, Any]] = []
 
-    table_source = trades_iter.copy()
-    if table_source.empty and not bt_trades.empty:
-        table_source = bt_trades.copy()
+    table_source = bt_trades.copy()
 
     if not table_source.empty:
         trade_columns = [str(c) for c in table_source.columns]
@@ -1616,7 +1628,6 @@ def main() -> None:
 
     run_dir = Path(args.run_dir)
     results_path = run_dir / "limited_results.csv"
-    trades_path = run_dir / "limited_trades.csv"
     meta_path = run_dir / "run_meta.json"
     if not results_path.exists() or not meta_path.exists():
         raise ValueError("Missing required run files: limited_results.csv and/or run_meta.json.")
@@ -1645,12 +1656,6 @@ def main() -> None:
     df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close"]).sort_index()
 
-    trades_iter = pd.DataFrame()
-    if trades_path.exists():
-        trades = pd.read_csv(trades_path)
-        if "iter" in trades.columns:
-            trades_iter = trades.loc[pd.to_numeric(trades["iter"], errors="coerce") == int(args.iter)].copy()
-
     strategy_module = _resolve_strategy_module(run_meta, args.strategy_module)
     mod = importlib.import_module(strategy_module)
     strategy_params = _build_strategy_params(mod, run_meta, iter_row)
@@ -1666,7 +1671,7 @@ def main() -> None:
 
     chart_df = _slice_chart_window(
         df_feat,
-        trades_iter,
+        bt_trades,
         window_mode=args.window_mode,
         context_bars=args.context_bars,
     )
@@ -1679,7 +1684,6 @@ def main() -> None:
     )
     payload = _build_payload(
         chart_df=chart_df,
-        trades_iter=trades_iter,
         bt_trades=bt_trades,
         line_segments=line_segments,
         title=title,

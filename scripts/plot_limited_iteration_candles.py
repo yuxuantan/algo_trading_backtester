@@ -39,6 +39,7 @@ STATE_LABEL = {
     1: "purple",
     2: "red",
 }
+ST_BLACK = 0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -164,14 +165,20 @@ def _segments_from_events(events: list[dict[str, Any]], fallback_end: pd.Timesta
         key = (pool, line_id)
         if ev_type == "line_created":
             lvl = float(ev.get("level"))
-            st = int(ev.get("state", 0))
+            st = int(ev.get("state", ST_BLACK))
+            pivot_t = t
+            confirm_t = _to_ts_utc(ev.get("confirm_time"))
+            if confirm_t is None:
+                confirm_t = pivot_t
+            if confirm_t < pivot_t:
+                confirm_t = pivot_t
             records[key] = {
                 "pool": pool,
                 "line_id": line_id,
                 "level": lvl,
-                "start": t,
-                "state": st,
-                "changes": [],
+                "start": pivot_t,
+                "state": ST_BLACK,
+                "changes": ([(confirm_t, st)] if st != ST_BLACK or confirm_t > pivot_t else []),
                 "end": None,
             }
             continue
@@ -454,7 +461,6 @@ def main() -> None:
 
     run_dir = Path(args.run_dir)
     results_path = run_dir / "limited_results.csv"
-    trades_path = run_dir / "limited_trades.csv"
     meta_path = run_dir / "run_meta.json"
     if not results_path.exists() or not meta_path.exists():
         raise ValueError("Missing required run files: limited_results.csv and/or run_meta.json.")
@@ -483,12 +489,6 @@ def main() -> None:
     df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
     df = df.dropna(subset=["open", "high", "low", "close"]).sort_index()
 
-    trades_iter = pd.DataFrame()
-    if trades_path.exists():
-        trades = pd.read_csv(trades_path)
-        if "iter" in trades.columns:
-            trades_iter = trades.loc[pd.to_numeric(trades["iter"], errors="coerce") == int(args.iter)].copy()
-
     strategy_module = _resolve_strategy_module(run_meta, args.strategy_module)
     mod = importlib.import_module(strategy_module)
     strategy_params = _build_strategy_params(mod, run_meta, iter_row)
@@ -496,12 +496,15 @@ def main() -> None:
 
     df_feat = mod.compute_features(df, strategy_params)
     debug: dict[str, Any] = {}
-    mod.run_backtest(df_feat, strategy_params=strategy_params, cfg=cfg, debug=debug)
+    bt_out = mod.run_backtest(df_feat, strategy_params=strategy_params, cfg=cfg, debug=debug)
     line_events = debug.get("line_events", [])
+    strategy_trades = pd.DataFrame()
+    if isinstance(bt_out, tuple) and len(bt_out) >= 2 and isinstance(bt_out[1], pd.DataFrame):
+        strategy_trades = bt_out[1].copy()
 
     chart_df = _slice_chart_window(
         df_feat,
-        trades_iter,
+        strategy_trades,
         window_mode=args.window_mode,
         context_bars=args.context_bars,
     )
@@ -517,7 +520,7 @@ def main() -> None:
     )
     fig = _build_figure(
         chart_df=chart_df,
-        trades_iter=trades_iter,
+        trades_iter=strategy_trades,
         line_segments=line_segments,
         title=title,
     )

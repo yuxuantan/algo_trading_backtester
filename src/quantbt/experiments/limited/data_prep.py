@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Iterator
 
 import pandas as pd
+
+from .types import EntryEvent
 
 
 def load_price_frame(data_path: str | Path, *, ts_col: str) -> pd.DataFrame:
@@ -40,7 +43,7 @@ def build_signal_frame(
     return df_sig
 
 
-def iter_entries_from_signals(df_sig: pd.DataFrame, *, use_atr: bool):
+def iter_entries_from_signals(df_sig: pd.DataFrame, *, use_atr: bool) -> Iterator[EntryEvent]:
     idx = df_sig.index.to_list()
     for i in range(len(idx) - 1):
         t = idx[i]

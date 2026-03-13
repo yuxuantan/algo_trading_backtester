@@ -34,6 +34,18 @@ If you use the project venv, prefer:
 .venv/bin/streamlit run streamlit_app.py
 ```
 
+On macOS, keep the machine awake while Streamlit is running (useful during long runs) with `caffeinate`:
+
+```bash
+caffeinate -i .venv/bin/streamlit run streamlit_app.py
+```
+
+If you are not using the project venv:
+
+```bash
+caffeinate -i streamlit run streamlit_app.py
+```
+
 The app has four sections:
 
 - `Run Tests`: launch walk-forward, Monte Carlo, or limited tests using existing CLI scripts.
@@ -138,9 +150,8 @@ Shared dataset used in examples:
 ### How pass/fail works
 
 - Each iteration is marked `favourable` when its summary matches `--favourable-criteria`.
-- Final pass uses:
+- A run passes when:
   - `favourable_pct >= --pass-threshold`
-- Summary is written to `pass_summary.json`.
 
 ## 4. Core System Test
 
@@ -239,7 +250,8 @@ Use:
 
 - `target_entries` = core `trades`
 - `long_ratio` = core `long_trade_pct / 100`
-- criteria describing “monkey is worse than core”
+- `total_return_%` criterion value = core `total_return_%`
+- criteria describing “monkey profit is worse than core AND monkey drawdown is worse than core”
 
 ```bash
 python3 scripts/run_limited_tests.py \
@@ -254,9 +266,14 @@ python3 scripts/run_limited_tests.py \
   --commission-rt 5
 ```
 
+Replace `16.3` and `11.4` with your baseline run’s own values.
+
 Interpretation:
 
-- `favourable_pct` in `pass_summary.json` = percent of monkey runs worse than core under your criteria.
+- `pass_summary.json` includes:
+  - `favourable_pct`
+  - `pass_threshold_%`
+  - `passed`
 
 ## 8. Monkey Exit Test
 
@@ -279,6 +296,8 @@ python3 scripts/run_limited_tests.py \
   --pass-threshold 90 \
   --commission-rt 5
 ```
+
+Replace `16.3` and `11.4` with your baseline run’s own values.
 
 ## 9. Monkey Entry + Monkey Exit Test
 
@@ -304,6 +323,8 @@ python3 scripts/run_limited_tests.py \
   --commission-rt 5
 ```
 
+Replace `16.3` and `11.4` with your baseline run’s own values.
+
 Run folder prefix:
 
 - `monkey_entry_exit_test__...`
@@ -323,8 +344,15 @@ Each run writes:
 `limited_results.csv` includes:
 
 - return and drawdown: `total_return_%`, `max_drawdown_%`, `max_drawdown_abs_%`
+- profit: `net_profit_abs`
 - trade structure: `trades`, `avg_bars_held`, `long_trade_pct`, `short_trade_pct`
 - verdict: `favourable`
+
+`pass_summary.json` includes:
+
+- legacy aggregate: `favourable_pct`
+- threshold: `pass_threshold_%`
+- overall gate: `passed`
 
 ## 11. Optimization (Optional)
 

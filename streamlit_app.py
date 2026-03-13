@@ -4,6 +4,7 @@ import ast
 import copy
 from dataclasses import MISSING, fields, is_dataclass
 from datetime import date
+import html
 import importlib
 import inspect
 import json
@@ -16,6 +17,12 @@ import subprocess
 import sys
 from typing import Any
 from urllib.parse import urlencode
+
+from quantbt.results import (
+    load_limited_summary,
+    load_montecarlo_summary,
+    load_walkforward_summary,
+)
 
 import numpy as np
 import pandas as pd
@@ -39,9 +46,6 @@ SRC_DIR = REPO_ROOT / "src"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
-from quantbt.experiments.walkforward.fitness import build_initial_review_report
-
 
 def _resolve_script_python() -> str:
     venv_python = REPO_ROOT / ".venv" / "bin" / "python"
@@ -82,6 +86,341 @@ DEFAULT_SIZING_PARAMS: dict[str, dict[str, Any]] = {
     "fixed_risk": {"risk_pct": 0.01},
     "fixed_units": {"units": 100000},
 }
+
+LIMITED_WORKBOOK_GLOBAL_INPUTS: list[str] = [
+    "Data start/end window",
+    "Slippage / spread (pips)",
+    "Commissions (round trip)",
+]
+
+LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
+    {
+        "name": "ENTRY TEST: fixed stop and target exit",
+        "test_type": "Fixed ATR Exit",
+        "preset": "Fixed ATR Exit",
+        "entry_params_label": "Baseline entry parameter set",
+        "exit_params_label": "Fixed stop / target exit parameters",
+        "seed_mode": "none",
+        "show_monkey_helper": False,
+        "inputs": [
+            "Baseline entry parameter set",
+            "Exit SL rule",
+            "Exit TP rule (e.g. fixed RR)",
+        ],
+        "outputs": [
+            "% of iterations profitable",
+            "# iterations",
+        ],
+        "pass_criteria": [
+            "% profitable > 70%",
+            "# iterations > 50",
+        ],
+    },
+    {
+        "name": "ENTRY TEST: fixed bar exit",
+        "test_type": "Fixed Bar Exit",
+        "preset": "Fixed Bar Exit",
+        "entry_params_label": "Baseline entry parameter set",
+        "exit_params_label": "Exit bars parameter set",
+        "seed_mode": "none",
+        "show_monkey_helper": False,
+        "inputs": [
+            "Baseline entry parameter set",
+            "Exit bars parameter set",
+        ],
+        "outputs": [
+            "% of iterations profitable",
+            "# iterations",
+        ],
+        "pass_criteria": [
+            "% profitable > 70%",
+            "# iterations > 50",
+        ],
+    },
+    {
+        "name": "EXIT TEST: similar approach entry",
+        "test_type": "Similar Entry",
+        "preset": "Similar Entry",
+        "entry_params_label": "Similar-entry parameter set",
+        "exit_params_label": "Baseline exit parameter set",
+        "seed_mode": "none",
+        "show_monkey_helper": False,
+        "inputs": [
+            "Similar-entry mechanics",
+            "Limited optimisable params (max 2)",
+            "Baseline exit param set",
+        ],
+        "outputs": [
+            "% of iterations profitable",
+            "# iterations",
+        ],
+        "pass_criteria": [
+            "% profitable > 70%",
+            "# iterations > 50",
+        ],
+    },
+    {
+        "name": "CORE TEST",
+        "test_type": "Core",
+        "preset": "Core",
+        "entry_params_label": "Baseline entry parameter set",
+        "exit_params_label": "Baseline exit parameter set",
+        "seed_mode": "none",
+        "show_monkey_helper": False,
+        "inputs": [
+            "Baseline entry parameter set",
+            "Baseline exit parameter set",
+        ],
+        "outputs": [
+            "% of iterations profitable",
+            "# iterations",
+        ],
+        "pass_criteria": [
+            "% profitable > 70%",
+            "# iterations > 50",
+        ],
+    },
+    {
+        "name": "MONKEY ENTRY + BASELINE EXIT",
+        "test_type": "Monkey Entry",
+        "preset": "Monkey Entry",
+        "entry_params_label": "Monkey entry parameters",
+        "exit_params_label": "Baseline exit parameter set",
+        "seed_mode": "entry",
+        "show_monkey_helper": True,
+        "inputs": [
+            "Baseline trade count (target entries)",
+            "Baseline long % (target long ratio)",
+            "Baseline exit parameters",
+        ],
+        "outputs": [
+            "% iterations with monkey net profit < baseline",
+            "% iterations with monkey max dd > baseline",
+        ],
+        "pass_criteria": [
+            "Profit dominance > 90%",
+            "Drawdown dominance > 90%",
+        ],
+    },
+    {
+        "name": "BASELINE ENTRY + MONKEY EXIT",
+        "test_type": "Monkey Exit",
+        "preset": "Monkey Exit",
+        "entry_params_label": "Baseline entry parameter set",
+        "exit_params_label": "Monkey exit parameters",
+        "seed_mode": "exit",
+        "show_monkey_helper": True,
+        "inputs": [
+            "Baseline entry parameters",
+            "Baseline avg hold bars (target)",
+            "Baseline exit parameters",
+        ],
+        "outputs": [
+            "% iterations with monkey net profit < baseline",
+            "% iterations with monkey max dd > baseline",
+        ],
+        "pass_criteria": [
+            "Profit dominance > 90%",
+            "Drawdown dominance > 90%",
+        ],
+    },
+    {
+        "name": "MONKEY ENTRY + MONKEY EXIT",
+        "test_type": "Monkey Entry + Exit",
+        "preset": "Monkey Entry + Exit",
+        "entry_params_label": "Monkey entry parameters",
+        "exit_params_label": "Monkey exit parameters",
+        "seed_mode": "entry",
+        "show_monkey_helper": True,
+        "inputs": [
+            "Baseline trade count (target)",
+            "Baseline long % (target)",
+            "Baseline avg hold bars (target)",
+        ],
+        "outputs": [
+            "% iterations with monkey net profit < baseline",
+            "% iterations with monkey max dd > baseline",
+        ],
+        "pass_criteria": [
+            "Profit dominance > 90%",
+            "Drawdown dominance > 90%",
+        ],
+    },
+]
+
+WORKBOOK_REVIEW_METRICS: list[dict[str, str]] = [
+    {
+        "label": "% of iterations profitable",
+        "default_unit": "%",
+        "aliases": "% profitable",
+    },
+    {
+        "label": "# iterations",
+        "default_unit": "count",
+        "aliases": "iterations",
+    },
+    {
+        "label": "% iterations with monkey net profit < baseline",
+        "default_unit": "%",
+        "aliases": "profit dominance|% of iterations with monkey net profit < baseline",
+    },
+    {
+        "label": "% iterations with monkey max dd > baseline",
+        "default_unit": "%",
+        "aliases": "drawdown dominance|% of iterations with monkey max dd > baseline",
+    },
+    {
+        "label": "Average hold bars",
+        "default_unit": "bars",
+        "aliases": "avg hold bars|avg bars held",
+    },
+]
+WORKBOOK_REVIEW_METRIC_OPTIONS: list[str] = [m["label"] for m in WORKBOOK_REVIEW_METRICS] + ["Custom"]
+WORKBOOK_REVIEW_UNIT_OPTIONS: list[str] = ["%", "count", "bars", "ratio", "raw"]
+WORKBOOK_REVIEW_OPERATOR_OPTIONS: list[str] = [">", ">=", "<", "<=", "=="]
+
+
+def _multiline_items_text(items: list[Any]) -> str:
+    return "\n".join(str(item).strip() for item in items if str(item).strip())
+
+
+def _normalize_workbook_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _guess_workbook_metric_label(label: Any) -> str:
+    text = _normalize_workbook_text(label)
+    if not text:
+        return "Custom"
+    for item in WORKBOOK_REVIEW_METRICS:
+        if text == _normalize_workbook_text(item.get("label", "")):
+            return str(item["label"])
+        aliases = [p.strip() for p in str(item.get("aliases", "")).split("|") if p.strip()]
+        if any(text == _normalize_workbook_text(alias) for alias in aliases):
+            return str(item["label"])
+    return "Custom"
+
+
+def _default_workbook_unit(metric_label: str) -> str:
+    for item in WORKBOOK_REVIEW_METRICS:
+        if str(item.get("label", "")) == str(metric_label):
+            return str(item.get("default_unit", "raw"))
+    return "raw"
+
+
+def _build_workbook_output_rows(items: list[Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in items:
+        label = str(item or "").strip()
+        if not label:
+            continue
+        rows.append(
+            {
+                "output_label": label,
+                "mapped_metric": _guess_workbook_metric_label(label),
+                "notes": "",
+            }
+        )
+    return rows
+
+
+def _parse_workbook_rule_item(item: Any) -> dict[str, Any]:
+    raw = str(item or "").strip()
+    metric_label = _guess_workbook_metric_label(raw)
+    rule_label = raw
+    operator = ""
+    threshold: float | None = None
+    unit = _default_workbook_unit(metric_label)
+    m = re.match(r"^(?P<label>.+?)\s*(?P<op>>=|<=|==|>|<)\s*(?P<value>-?\d+(?:\.\d+)?)\s*(?P<unit>%|count|bars|ratio|raw)?\s*$", raw)
+    if m:
+        rule_label = str(m.group("label") or "").strip()
+        metric_label = _guess_workbook_metric_label(rule_label)
+        operator = str(m.group("op") or "").strip()
+        try:
+            threshold = float(str(m.group("value") or "").strip())
+        except Exception:
+            threshold = None
+        unit = str(m.group("unit") or _default_workbook_unit(metric_label)).strip() or "raw"
+    return {
+        "rule_label": rule_label,
+        "mapped_metric": metric_label,
+        "operator": operator,
+        "threshold": threshold,
+        "unit": unit,
+    }
+
+
+def _build_workbook_rule_rows(items: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        label = str(item or "").strip()
+        if not label:
+            continue
+        rows.append(_parse_workbook_rule_item(label))
+    return rows
+
+
+def _clean_workbook_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    cleaned: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        output_label = str(row.get("output_label", "") or "").strip()
+        mapped_metric = str(row.get("mapped_metric", "Custom") or "Custom").strip()
+        notes = str(row.get("notes", "") or "").strip()
+        if not output_label and not notes and mapped_metric in {"", "Custom"}:
+            continue
+        if mapped_metric not in WORKBOOK_REVIEW_METRIC_OPTIONS:
+            mapped_metric = "Custom"
+        cleaned.append(
+            {
+                "output_label": output_label,
+                "mapped_metric": mapped_metric,
+                "notes": notes,
+            }
+        )
+    return cleaned
+
+
+def _clean_workbook_rule_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        rule_label = str(row.get("rule_label", "") or "").strip()
+        mapped_metric = str(row.get("mapped_metric", "Custom") or "Custom").strip()
+        operator = str(row.get("operator", "") or "").strip()
+        unit = str(row.get("unit", "") or "").strip()
+        threshold_raw = row.get("threshold")
+        threshold: float | None
+        try:
+            threshold = None if threshold_raw is None or pd.isna(threshold_raw) else float(threshold_raw)
+        except Exception:
+            threshold = None
+        if not rule_label and mapped_metric in {"", "Custom"} and not operator and threshold is None and not unit:
+            continue
+        if mapped_metric not in WORKBOOK_REVIEW_METRIC_OPTIONS:
+            mapped_metric = "Custom"
+        if operator and operator not in WORKBOOK_REVIEW_OPERATOR_OPTIONS:
+            operator = ""
+        if unit and unit not in WORKBOOK_REVIEW_UNIT_OPTIONS:
+            unit = "raw"
+        if not unit:
+            unit = _default_workbook_unit(mapped_metric)
+        cleaned.append(
+            {
+                "rule_label": rule_label,
+                "mapped_metric": mapped_metric,
+                "operator": operator,
+                "threshold": threshold,
+                "unit": unit,
+            }
+        )
+    return cleaned
+
+
+def _workbook_rows_fingerprint(rows: list[dict[str, Any]]) -> str:
+    return json.dumps(rows, sort_keys=True, default=str)
 
 
 def _rel(path: Path) -> str:
@@ -137,11 +476,107 @@ def _json_pretty(obj: Any) -> str:
     return json.dumps(obj, indent=2, sort_keys=True, default=str)
 
 
+def _json_object_or_empty(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return copy.deepcopy(raw)
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+    return copy.deepcopy(data) if isinstance(data, dict) else {}
+
+
+def _sync_widget_from_source(widget_key: str, value: Any) -> None:
+    source_key = f"_{widget_key}_source"
+    if st.session_state.get(source_key) != value:
+        st.session_state[widget_key] = value
+        st.session_state[source_key] = value
+
+
+def _value_to_csv_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
+
+
+def _parse_csv_numeric_text(raw: str, *, kind: str) -> tuple[bool, Any, str]:
+    text = str(raw or "").strip()
+    if not text:
+        return True, None, "blank (optional)"
+    cleaned = text.strip("[]")
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    if not parts:
+        return True, None, "blank (optional)"
+    try:
+        if kind == "int":
+            values = [int(p) for p in parts]
+        else:
+            values = [float(p) for p in parts]
+    except Exception:
+        label = "integers" if kind == "int" else "numbers"
+        return False, None, f"enter comma-separated {label}"
+    out: Any = values[0] if len(values) == 1 else values
+    detail = "single value" if len(values) == 1 else f"{len(values)} values"
+    return True, out, detail
+
+
+def _build_numeric_range_values(start: float, stop: float, step: float, *, integer: bool) -> list[int] | list[float]:
+    if not math.isfinite(start) or not math.isfinite(stop) or not math.isfinite(step):
+        raise ValueError("range values must be finite")
+    if step <= 0:
+        raise ValueError("step must be > 0")
+    if stop < start:
+        raise ValueError("stop must be >= start")
+    values: list[int] | list[float] = []
+    i = 0
+    cur = float(start)
+    limit = 1000
+    eps = max(abs(step), 1.0) * 1e-9
+    while cur <= float(stop) + eps:
+        values.append(int(round(cur)) if integer else round(cur, 10))
+        i += 1
+        if i > limit:
+            raise ValueError("range generated too many values")
+        cur = float(start) + (i * float(step))
+    if not values:
+        values = [int(round(start))] if integer else [round(float(start), 10)]
+    return values
+
+
+def _derive_numeric_range_spec(values: Any) -> tuple[float, float, float, bool] | None:
+    if not isinstance(values, list) or not values:
+        return None
+    try:
+        numeric = [float(v) for v in values]
+    except Exception:
+        return None
+    integer = all(float(v).is_integer() for v in numeric)
+    if len(numeric) == 1:
+        step = 1.0 if integer else 0.1
+        return float(numeric[0]), float(numeric[0]), float(step), bool(integer)
+    diffs = [round(numeric[i + 1] - numeric[i], 10) for i in range(len(numeric) - 1)]
+    if any(d <= 0 for d in diffs):
+        return None
+    step = diffs[0]
+    if any(abs(d - step) > 1e-8 for d in diffs[1:]):
+        return None
+    return float(numeric[0]), float(numeric[-1]), float(step), bool(integer)
+
+
 def _parse_extra_args(raw: str) -> list[str]:
     raw = (raw or "").strip()
     if not raw:
         return []
     return shlex.split(raw)
+
+
+def _cli_flag_present(args: list[str], flag: str) -> bool:
+    return any((a == flag) or a.startswith(f"{flag}=") for a in args)
 
 
 def _run_cli(cmd: list[str]) -> tuple[int, str]:
@@ -399,6 +834,27 @@ def _discover_limited_runs() -> list[Path]:
     return sorted(out, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def _discover_live_trade_files() -> list[Path]:
+    candidates: list[Path] = []
+    search_roots = [RUNS_ROOT, REPO_ROOT / "data"]
+    patterns = ("*live*.csv", "*pilot*.csv", "*paper*.csv")
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            candidates.extend(p for p in root.rglob(pattern) if p.is_file())
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for p in sorted(candidates, key=lambda x: x.stat().st_mtime, reverse=True):
+        key = p.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    return unique
+
+
 def _select_path_from_options(label: str, options: list[str], default: str, *, key_prefix: str) -> str:
     merged = []
     seen = set()
@@ -483,11 +939,221 @@ def _render_status_badge(label: str, ok: bool) -> None:
     st.markdown(
         (
             f'<div style="display:inline-flex;align-items:center;gap:10px;'
-            f'padding:8px 14px;border-radius:10px;border:2px solid {border};'
+            f'padding:7px 12px;border-radius:12px;border:2px solid {border};'
             f'background:{bg};margin:4px 0 10px 0;">'
-            f'<span style="font-size:13px;font-weight:600;color:{fg};">{label}</span>'
-            f'<span style="font-size:30px;line-height:1;font-weight:900;color:{fg};">{status}</span>'
+            f'<span style="font-size:12px;font-weight:700;color:{fg};">{label}</span>'
+            f'<span style="font-size:24px;line-height:1;font-weight:900;color:{fg};">{status}</span>'
             f"</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_decision_badge(label: str, decision: str) -> None:
+    decision_norm = str(decision).strip().upper()
+    if decision_norm == "PASS":
+        border = "#16a34a"
+        bg = "rgba(22,163,74,0.10)"
+        fg = "#166534"
+    elif decision_norm == "RETRY":
+        border = "#d97706"
+        bg = "rgba(217,119,6,0.12)"
+        fg = "#92400e"
+    else:
+        decision_norm = "FAIL"
+        border = "#dc2626"
+        bg = "rgba(220,38,38,0.10)"
+        fg = "#991b1b"
+
+    st.markdown(
+        (
+            f'<div style="display:inline-flex;align-items:center;gap:10px;'
+            f'padding:7px 12px;border-radius:12px;border:2px solid {border};'
+            f'background:{bg};margin:4px 0 10px 0;">'
+            f'<span style="font-size:12px;font-weight:700;color:{fg};">{label}</span>'
+            f'<span style="font-size:24px;line-height:1;font-weight:900;color:{fg};">{decision_norm}</span>'
+            f"</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _inject_app_css() -> None:
+    st.markdown(
+        """
+        <style>
+          .stApp {
+            background:
+              radial-gradient(circle at top right, rgba(22,98,74,0.10), transparent 24%),
+              linear-gradient(180deg, #f7f4ed 0%, #f1eee6 100%);
+          }
+          .block-container {
+            max-width: 1480px;
+            padding-top: 1rem;
+            padding-bottom: 2.2rem;
+          }
+          h1, h2, h3, h4 {
+            letter-spacing: -0.02em;
+          }
+          h1 {
+            font-size: 3rem !important;
+            line-height: 1.02 !important;
+            margin: 0 0 0.4rem 0 !important;
+          }
+          h2 {
+            font-size: 2.15rem !important;
+            line-height: 1.08 !important;
+            margin: 1rem 0 0.35rem 0 !important;
+          }
+          h3 {
+            font-size: 1.45rem !important;
+            line-height: 1.12 !important;
+            margin: 0.85rem 0 0.3rem 0 !important;
+          }
+          h4 {
+            font-size: 1.12rem !important;
+            line-height: 1.18 !important;
+            margin: 0.7rem 0 0.2rem 0 !important;
+          }
+          [data-testid="stMetric"] {
+            background: transparent !important;
+            border: none !important;
+            padding: 0 !important;
+          }
+          div[data-baseweb="select"] > div,
+          .stTextInput > div > div > input,
+          .stTextArea textarea,
+          .stNumberInput input {
+            border-radius: 12px !important;
+            background: rgba(255,255,255,0.88) !important;
+          }
+          .qt-metric-card {
+            background: rgba(255,255,255,0.72);
+            border: 1px solid rgba(141,129,105,0.20);
+            border-radius: 16px;
+            padding: 0.8rem 0.9rem 0.85rem 0.9rem;
+            min-height: 96px;
+            box-shadow: 0 8px 18px rgba(77,55,19,0.04);
+          }
+          .qt-metric-label {
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #6b6658;
+            margin-bottom: 0.45rem;
+          }
+          .qt-metric-value {
+            font-size: clamp(1.08rem, 1.7vw, 1.85rem);
+            line-height: 1.1;
+            font-weight: 700;
+            color: #313445;
+            word-break: break-word;
+          }
+          .qt-metric-value-long {
+            font-size: clamp(0.98rem, 1.35vw, 1.22rem);
+            line-height: 1.2;
+          }
+          .qt-subtle-card {
+            border: 1px solid #d9d1c2;
+            border-radius: 18px;
+            padding: 14px 16px;
+            background: rgba(255,255,255,0.82);
+            box-shadow: 0 12px 30px rgba(77,55,19,0.05);
+            margin: 0 0 10px 0;
+          }
+          .qt-kicker {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: #6b6658;
+            font-weight: 700;
+            margin-bottom: 0.45rem;
+          }
+          .qt-card-title {
+            font-size: 1.08rem;
+            font-weight: 700;
+            color: #1f2a23;
+            margin-bottom: 0.3rem;
+          }
+          .qt-card-note {
+            font-size: 0.92rem;
+            color: #5c584f;
+            margin-bottom: 0;
+          }
+          .qt-chip-title {
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: #5b574b;
+            margin: 0 0 0.45rem 0;
+          }
+          .qt-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin: 0 0 0.6rem 0;
+          }
+          .qt-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.42rem 0.7rem;
+            border-radius: 999px;
+            font-size: 0.84rem;
+            line-height: 1.25;
+            border: 1px solid transparent;
+          }
+          .qt-chip-input {
+            background: rgba(34,102,78,0.08);
+            color: #1a5c46;
+            border-color: rgba(34,102,78,0.12);
+          }
+          .qt-chip-output {
+            background: rgba(180,83,9,0.09);
+            color: #92400e;
+            border-color: rgba(180,83,9,0.12);
+          }
+          .qt-chip-pass {
+            background: rgba(22,163,74,0.10);
+            color: #166534;
+            border-color: rgba(22,163,74,0.14);
+          }
+          div.stButton > button {
+            border-radius: 999px;
+            padding: 0.52rem 1rem;
+            font-weight: 650;
+            border: 1px solid rgba(31,86,63,0.18);
+          }
+          div.stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #17624a, #103e35);
+            color: white;
+            border: none;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_chip_group(title: str, items: list[str], *, tone: str) -> None:
+    tone_class = {
+        "input": "qt-chip-input",
+        "output": "qt-chip-output",
+        "pass": "qt-chip-pass",
+    }.get(tone, "qt-chip-input")
+    chips = [
+        f'<span class="qt-chip {tone_class}">{html.escape(str(item).strip())}</span>'
+        for item in items
+        if str(item).strip()
+    ]
+    if not chips:
+        st.caption("None")
+        return
+    st.markdown(
+        (
+            f'<div class="qt-chip-title">{html.escape(title)}</div>'
+            f'<div class="qt-chip-row">{"".join(chips)}</div>'
         ),
         unsafe_allow_html=True,
     )
@@ -515,6 +1181,304 @@ def _median_numeric(df: pd.DataFrame, col: str) -> float:
     if s.empty:
         return float("nan")
     return float(s.median())
+
+
+def _infer_initial_equity_from_spec(spec: dict[str, Any]) -> float:
+    cfg = spec.get("config", {}) if isinstance(spec, dict) else {}
+    initial_equity = _as_float(cfg.get("initial_equity", 100000.0))
+    if not np.isfinite(initial_equity) or initial_equity <= 0:
+        return 100000.0
+    return float(initial_equity)
+
+
+def _limited_net_profit_series(results: pd.DataFrame, *, initial_equity: float) -> pd.Series:
+    if "net_profit_abs" in results.columns:
+        s = pd.to_numeric(results["net_profit_abs"], errors="coerce")
+        return s.replace([np.inf, -np.inf], np.nan)
+
+    if "total_return_%" in results.columns:
+        ret = pd.to_numeric(results["total_return_%"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        return (ret / 100.0) * float(initial_equity)
+
+    if "final_equity" in results.columns:
+        final_eq = pd.to_numeric(results["final_equity"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        return final_eq - float(initial_equity)
+
+    return pd.Series(np.nan, index=results.index)
+
+
+def _load_limited_run_artifacts(run_dir: Path) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]] | None:
+    results_path = run_dir / "limited_results.csv"
+    meta_path = run_dir / "run_meta.json"
+    pass_path = run_dir / "pass_summary.json"
+    if not results_path.exists() or not meta_path.exists():
+        return None
+    try:
+        results = pd.read_csv(results_path)
+        run_meta = _read_json(meta_path)
+        pass_summary = _read_json(pass_path) if pass_path.exists() else {}
+        return results, run_meta, pass_summary
+    except Exception:
+        return None
+
+
+def _pick_limited_row(results: pd.DataFrame, *, iter_id: int | None = None) -> pd.Series | None:
+    if results.empty:
+        return None
+    if iter_id is not None and "iter" in results.columns:
+        mask = pd.to_numeric(results["iter"], errors="coerce") == int(iter_id)
+        picked = results.loc[mask]
+        if not picked.empty:
+            return picked.iloc[0]
+    return results.iloc[0]
+
+
+def _limited_baseline_metrics_from_row(row: pd.Series, *, initial_equity: float) -> dict[str, float]:
+    trades = _as_float(row.get("trades"))
+    long_trade_pct = _as_float(row.get("long_trade_pct"))
+    short_trade_pct = _as_float(row.get("short_trade_pct"))
+    avg_bars_held = _as_float(row.get("avg_bars_held"))
+    total_return_pct = _as_float(row.get("total_return_%"))
+    max_dd_pct = _as_float(row.get("max_drawdown_abs_%"))
+    if not np.isfinite(max_dd_pct):
+        max_dd_pct = _as_float(row.get("max_drawdown_%"))
+
+    net_profit_abs = _as_float(row.get("net_profit_abs"))
+    if not np.isfinite(net_profit_abs):
+        final_equity = _as_float(row.get("final_equity"))
+        if np.isfinite(final_equity):
+            net_profit_abs = float(final_equity - initial_equity)
+        elif np.isfinite(total_return_pct):
+            net_profit_abs = float((total_return_pct / 100.0) * initial_equity)
+
+    return {
+        "trades": float(trades) if np.isfinite(trades) else float("nan"),
+        "long_trade_pct": float(long_trade_pct) if np.isfinite(long_trade_pct) else float("nan"),
+        "short_trade_pct": float(short_trade_pct) if np.isfinite(short_trade_pct) else float("nan"),
+        "avg_bars_held": float(avg_bars_held) if np.isfinite(avg_bars_held) else float("nan"),
+        "total_return_%": float(total_return_pct) if np.isfinite(total_return_pct) else float("nan"),
+        "max_drawdown_abs_%": float(max_dd_pct) if np.isfinite(max_dd_pct) else float("nan"),
+        "net_profit_abs": float(net_profit_abs) if np.isfinite(net_profit_abs) else float("nan"),
+    }
+
+
+def _build_monkey_dominance_criteria(*, baseline_return_pct: float, baseline_max_dd_pct: float) -> dict[str, Any]:
+    return {
+        "mode": "all",
+        "rules": [
+            {"metric": "total_return_%", "op": "<", "value": float(baseline_return_pct)},
+            {"metric": "max_drawdown_abs_%", "op": ">", "value": float(baseline_max_dd_pct)},
+        ],
+    }
+
+
+def _compute_monkey_constrained_dominance(
+    *,
+    monkey_results: pd.DataFrame,
+    baseline_return_pct: float,
+    baseline_max_dd_pct: float,
+    baseline_trades: float,
+    baseline_long_trade_pct: float,
+    trade_count_tol_pct: float = 5.0,
+    long_ratio_tol_pp: float = 5.0,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "valid_trials": 0,
+        "total_trials": int(len(monkey_results)),
+        "valid_pct": float("nan"),
+        "dominance_valid_pct": float("nan"),
+        "trade_low": float("nan"),
+        "trade_high": float("nan"),
+        "long_low": float("nan"),
+        "long_high": float("nan"),
+    }
+    if monkey_results.empty:
+        return out
+    if not (
+        np.isfinite(baseline_return_pct)
+        and np.isfinite(baseline_max_dd_pct)
+        and np.isfinite(baseline_trades)
+        and baseline_trades > 0
+        and np.isfinite(baseline_long_trade_pct)
+    ):
+        return out
+
+    trades = pd.to_numeric(monkey_results.get("trades", pd.Series(index=monkey_results.index, dtype=float)), errors="coerce")
+    long_pct = pd.to_numeric(monkey_results.get("long_trade_pct", pd.Series(index=monkey_results.index, dtype=float)), errors="coerce")
+    ret = pd.to_numeric(monkey_results.get("total_return_%", pd.Series(index=monkey_results.index, dtype=float)), errors="coerce")
+    dd = pd.to_numeric(monkey_results.get("max_drawdown_abs_%", pd.Series(index=monkey_results.index, dtype=float)), errors="coerce")
+    if "max_drawdown_abs_%" not in monkey_results.columns:
+        dd = pd.to_numeric(monkey_results.get("max_drawdown_%", pd.Series(index=monkey_results.index, dtype=float)), errors="coerce")
+
+    trade_low = float(baseline_trades * (1.0 - float(trade_count_tol_pct) / 100.0))
+    trade_high = float(baseline_trades * (1.0 + float(trade_count_tol_pct) / 100.0))
+    long_low = float(baseline_long_trade_pct - float(long_ratio_tol_pp))
+    long_high = float(baseline_long_trade_pct + float(long_ratio_tol_pp))
+
+    valid_mask = (
+        trades.notna()
+        & long_pct.notna()
+        & ret.notna()
+        & dd.notna()
+        & (trades >= trade_low)
+        & (trades <= trade_high)
+        & (long_pct >= long_low)
+        & (long_pct <= long_high)
+    )
+    valid_trials = int(valid_mask.sum())
+    out["valid_trials"] = valid_trials
+    out["valid_pct"] = float((valid_trials / len(monkey_results)) * 100.0) if len(monkey_results) else float("nan")
+    out["trade_low"] = trade_low
+    out["trade_high"] = trade_high
+    out["long_low"] = long_low
+    out["long_high"] = long_high
+
+    if valid_trials <= 0:
+        return out
+
+    dom_mask = valid_mask & (ret < float(baseline_return_pct)) & (dd > float(baseline_max_dd_pct))
+    dominance_valid_pct = float((dom_mask.sum() / valid_trials) * 100.0)
+    out["dominance_valid_pct"] = dominance_valid_pct
+    return out
+
+
+def _is_monkey_limited_run(run_meta: dict[str, Any]) -> bool:
+    spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
+    strategy_cfg = spec.get("strategy", {}) if isinstance(spec, dict) else {}
+    entry_cfg = strategy_cfg.get("entry", {}) if isinstance(strategy_cfg, dict) else {}
+    exit_cfg = strategy_cfg.get("exit", {}) if isinstance(strategy_cfg, dict) else {}
+
+    rules = entry_cfg.get("rules", []) if isinstance(entry_cfg, dict) else []
+    entry_plugins = {
+        str(r.get("name", "")).strip()
+        for r in rules
+        if isinstance(r, dict) and str(r.get("name", "")).strip()
+    }
+    exit_plugin = str(exit_cfg.get("name", "")).strip()
+    monkey_plugins = {"monkey_entry", "monkey_exit", "random", "random_time_exit"}
+    return bool(entry_plugins.intersection(monkey_plugins) or exit_plugin in monkey_plugins)
+
+
+def _classify_limited_core_decision(
+    *,
+    profitable_runs: int,
+    median_profit: float,
+    median_trades: float,
+    best_over_median: float,
+) -> str:
+    pass_ok = (
+        profitable_runs >= 70
+        and median_profit > 0
+        and median_trades >= 75
+        and best_over_median <= 3.0
+    )
+    retry_ok = (
+        (50 <= profitable_runs <= 69)
+        or (30 <= median_trades <= 74)
+        or (median_profit > 0 and 3.0 < best_over_median <= 5.0)
+    )
+    fail_ok = (
+        profitable_runs < 50
+        or median_profit <= 0
+        or median_trades < 30
+        or best_over_median > 5.0
+    )
+    if pass_ok:
+        return "PASS"
+    if fail_ok:
+        return "FAIL"
+    if retry_ok:
+        return "RETRY"
+    return "FAIL"
+
+
+def _classify_monkey_dominance_decision(dominance_pct: float) -> str:
+    if np.isfinite(dominance_pct) and dominance_pct >= 85.0:
+        return "PASS"
+    if np.isfinite(dominance_pct) and dominance_pct >= 75.0:
+        return "RETRY"
+    return "FAIL"
+
+
+def _classify_walkforward_decision(*, segments: int, profitable_oos_pct: float, top2_share_pct: float) -> str:
+    if (
+        segments >= 8
+        and np.isfinite(profitable_oos_pct)
+        and np.isfinite(top2_share_pct)
+        and profitable_oos_pct >= 60.0
+        and top2_share_pct <= 50.0
+    ):
+        return "PASS"
+    if (
+        segments < 8
+        or (np.isfinite(profitable_oos_pct) and profitable_oos_pct < 50.0)
+        or (np.isfinite(top2_share_pct) and top2_share_pct > 60.0)
+        or not np.isfinite(profitable_oos_pct)
+        or not np.isfinite(top2_share_pct)
+    ):
+        return "FAIL"
+    if (
+        (np.isfinite(profitable_oos_pct) and 50.0 <= profitable_oos_pct < 60.0)
+        or (np.isfinite(top2_share_pct) and 50.0 < top2_share_pct <= 60.0)
+    ):
+        return "RETRY"
+    return "FAIL"
+
+
+def _classify_monte_carlo_risk_decision(*, dd_ratio: float, original_profit: float, profit_after_removal: float) -> str:
+    dd_pass = np.isfinite(dd_ratio) and dd_ratio <= 1.7
+    dd_retry = np.isfinite(dd_ratio) and 1.7 < dd_ratio <= 2.0
+    dd_fail = (not np.isfinite(dd_ratio)) or dd_ratio > 2.0
+
+    outlier_pass = np.isfinite(profit_after_removal) and profit_after_removal > 0.0
+    if np.isfinite(original_profit) and original_profit > 0:
+        outlier_retry = (
+            np.isfinite(profit_after_removal)
+            and profit_after_removal <= 0.0
+            and profit_after_removal > (-0.10 * original_profit)
+        )
+        outlier_fail = (not np.isfinite(profit_after_removal)) or profit_after_removal <= (-0.10 * original_profit)
+    else:
+        outlier_retry = False
+        outlier_fail = (not np.isfinite(profit_after_removal)) or profit_after_removal <= 0.0
+
+    if dd_pass and outlier_pass:
+        return "PASS"
+    if dd_fail or outlier_fail:
+        return "FAIL"
+    if dd_retry or outlier_retry:
+        return "RETRY"
+    return "FAIL"
+
+
+def _classify_live_pilot_decision(*, live_net_profit: float, band_p5: float, band_p95: float, initial_equity: float) -> str:
+    if not (np.isfinite(live_net_profit) and np.isfinite(band_p5) and np.isfinite(band_p95) and np.isfinite(initial_equity)):
+        return "FAIL"
+    if band_p5 <= live_net_profit <= band_p95:
+        return "PASS"
+
+    distance = (band_p5 - live_net_profit) if live_net_profit < band_p5 else (live_net_profit - band_p95)
+    if distance > (0.05 * initial_equity):
+        return "FAIL"
+    return "RETRY"
+
+
+def _mc_profit_distribution_from_pool(pool: np.ndarray, *, n_trades: int, n_sims: int, seed: int) -> np.ndarray:
+    if pool.size == 0 or n_trades <= 0 or n_sims <= 0:
+        return np.array([], dtype=float)
+    rng = np.random.default_rng(int(seed))
+    idx = rng.integers(0, pool.size, size=(int(n_sims), int(n_trades)))
+    sampled = pool[idx]
+    return sampled.sum(axis=1).astype(float)
+
+
+def _max_drawdown_pct_from_equity_series(equity: pd.Series) -> float:
+    s = pd.to_numeric(equity, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if s.empty:
+        return float("nan")
+    peak = s.cummax()
+    dd = (peak - s) / peak
+    return float(dd.max() * 100.0)
 
 
 def _parse_params_cell(raw: Any) -> Any:
@@ -648,6 +1612,116 @@ def _render_limited_atr_robustness(results: pd.DataFrame) -> None:
 
     display_cols = [c for c in ["rr", "sldist_atr_mult", "iters", "favourable_%", "median_return_%", "median_max_dd_%", "median_mar", "median_sortino", "return_iqr_%", "negative_return_%", "robust_rank"] if c in rob.columns]
     st.dataframe(rob[display_cols], use_container_width=True, hide_index=True)
+
+
+def _render_limited_hold_bars_robustness(results: pd.DataFrame) -> None:
+    if results.empty or "exit_params" not in results.columns:
+        return
+
+    work = results.copy()
+    work["_hold_bars"] = work["exit_params"].apply(lambda x: _extract_numeric_param(x, ["hold_bars"]))
+    work = work.loc[pd.to_numeric(work["_hold_bars"], errors="coerce").notna()].copy()
+    if work.empty:
+        return
+
+    rows: list[dict[str, Any]] = []
+    grouped = work.groupby(["_hold_bars"], dropna=False)
+    for key, g in grouped:
+        hold_bars = float(key[0] if isinstance(key, tuple) else key)
+        out: dict[str, Any] = {
+            "hold_bars": hold_bars,
+            "iters": int(len(g)),
+        }
+
+        if "favourable" in g.columns:
+            fav_series = g["favourable"].astype(bool)
+            out["favourable_%"] = float(fav_series.mean() * 100.0)
+        else:
+            out["favourable_%"] = float("nan")
+
+        out["median_return_%"] = _median_numeric(g, "total_return_%")
+        out["median_max_dd_%"] = _median_numeric(g, "max_drawdown_abs_%")
+        out["median_mar"] = _median_numeric(g, "mar")
+        out["median_sortino"] = _median_numeric(g, "sortino")
+        out["return_iqr_%"] = _iqr_numeric(g, "total_return_%")
+
+        ret_s = pd.to_numeric(g.get("total_return_%", pd.Series(dtype=float)), errors="coerce").dropna()
+        out["negative_return_%"] = float((ret_s < 0).mean() * 100.0) if not ret_s.empty else float("nan")
+
+        rows.append(out)
+
+    rob = pd.DataFrame(rows)
+    if rob.empty:
+        return
+
+    rank_cols: list[pd.Series] = []
+    for col, asc in (
+        ("favourable_%", False),
+        ("median_return_%", False),
+        ("median_max_dd_%", True),
+        ("return_iqr_%", True),
+    ):
+        s = pd.to_numeric(rob[col], errors="coerce")
+        rank_cols.append(s.rank(method="min", ascending=asc, na_option="bottom"))
+    rob["robust_rank"] = pd.concat(rank_cols, axis=1).mean(axis=1)
+    rob = rob.sort_values(["robust_rank", "iters", "favourable_%"], ascending=[True, False, False]).reset_index(drop=True)
+
+    best = rob.iloc[0]
+    best_hold = float(best["hold_bars"])
+    best_label = f"hold_bars={int(round(best_hold))}" if abs(best_hold - round(best_hold)) < 1e-9 else f"hold_bars={best_hold:.3f}"
+
+    st.subheader("Fixed Bar Exit Robustness")
+    st.caption(
+        "Grouped by `hold_bars` to identify a stable fixed holding period for entry-quality testing."
+    )
+    st.info(f"Suggested robust setting: `{best_label}` (lowest composite robustness rank).")
+
+    display_cols = [c for c in ["hold_bars", "iters", "favourable_%", "median_return_%", "median_max_dd_%", "median_mar", "median_sortino", "return_iqr_%", "negative_return_%", "robust_rank"] if c in rob.columns]
+    st.dataframe(rob[display_cols], use_container_width=True, hide_index=True)
+
+
+def _render_limited_test_param_space(run_meta: dict[str, Any]) -> None:
+    spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
+    strategy_cfg = spec.get("strategy", {}) if isinstance(spec, dict) else {}
+    entry_cfg = strategy_cfg.get("entry", {}) if isinstance(strategy_cfg, dict) else {}
+    exit_cfg = strategy_cfg.get("exit", {}) if isinstance(strategy_cfg, dict) else {}
+    sizing_cfg = strategy_cfg.get("sizing", {}) if isinstance(strategy_cfg, dict) else {}
+
+    entry_rules = entry_cfg.get("rules", []) if isinstance(entry_cfg, dict) else []
+    if not isinstance(entry_rules, list):
+        entry_rules = []
+
+    st.subheader("Test Parameter Space")
+    st.caption("Exact strategy/parameter space used for this run (from `run_meta.json`).")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Entry**")
+        if entry_rules:
+            entry_plugin_names = [str(r.get("name", "")) for r in entry_rules if isinstance(r, dict)]
+            st.caption(
+                f"Mode: `{entry_cfg.get('mode', 'all')}`"
+                + (f" | Vote-k: `{entry_cfg.get('vote_k')}`" if entry_cfg.get("vote_k") is not None else "")
+            )
+            st.code(_json_pretty({"rules": entry_rules, "plugins": entry_plugin_names}), language="json")
+        else:
+            st.info("No entry rules found in run metadata.")
+
+    with c2:
+        st.markdown("**Exit**")
+        if isinstance(exit_cfg, dict) and exit_cfg:
+            st.caption(f"Plugin: `{exit_cfg.get('name', '')}`")
+            st.code(_json_pretty(exit_cfg.get("params", {})), language="json")
+        else:
+            st.info("No exit config found in run metadata.")
+
+    with c3:
+        st.markdown("**Sizing**")
+        if isinstance(sizing_cfg, dict) and sizing_cfg:
+            st.caption(f"Plugin: `{sizing_cfg.get('name', '')}`")
+            st.code(_json_pretty(sizing_cfg.get("params", {})), language="json")
+        else:
+            st.info("No sizing config found in run metadata.")
 
 
 def _style_rows_by_metric(df: pd.DataFrame, metric_col: str) -> pd.io.formats.style.Styler:
@@ -896,6 +1970,12 @@ def _prefill_limited_form_from_run(
     commission_rt = cfg.get("commission_per_round_trip") if isinstance(cfg, dict) else None
     if commission_rt is not None:
         st.session_state["limited_commission_rt"] = str(commission_rt)
+    spread_pips = cfg.get("spread_pips") if isinstance(cfg, dict) else None
+    if spread_pips is not None:
+        st.session_state["limited_spread_pips"] = str(spread_pips)
+    pip_size = cfg.get("pip_size") if isinstance(cfg, dict) else None
+    if pip_size is not None:
+        st.session_state["limited_pip_size"] = str(pip_size)
 
     pass_threshold = test_cfg.get("pass_threshold_pct")
     if pass_threshold is None:
@@ -938,6 +2018,7 @@ def _prefill_limited_form_from_run(
     st.session_state["limited_exit_seed_start"] = ""
 
     # Keep template UI stable while using explicit prefilled values.
+    st.session_state["limited_test_type"] = "Custom"
     st.session_state["limited_test_template"] = "Core"
     st.session_state["_limited_prefill_lock"] = True
 
@@ -1132,35 +2213,62 @@ def _auto_generate_interactive_html(*, run_kind: str, run_path: Path) -> tuple[b
     return False, out.strip() or f"HTML generation failed for {run_kind}"
 
 
+def _ensure_limited_iteration_chart(*, run_dir: Path, iter_id: int) -> tuple[bool, Path | str]:
+    out_file = run_dir / f"iteration_{int(iter_id)}_lightweight.html"
+    cmd = [
+        SCRIPT_PYTHON,
+        str(SCRIPTS_DIR / "plot_limited_iteration_lightweight.py"),
+        "--run-dir",
+        run_dir.as_posix(),
+        "--iter",
+        str(int(iter_id)),
+        "--include-black-lines",
+    ]
+    rc, out = _run_cli(cmd)
+    if rc != 0:
+        return False, out.strip() or "Failed to generate iteration candlestick chart."
+
+    parsed = _extract_saved_path(out, "Saved lightweight chart:")
+    chart_path = parsed if parsed is not None else out_file
+    if chart_path.exists():
+        return True, chart_path
+    return False, out.strip() or f"Chart file not found after generation: {_rel(out_file)}"
+
+
 def _render_metric_row(metrics: list[tuple[str, Any, str]]) -> None:
     cols = st.columns(len(metrics)) if metrics else []
     for c, (label, value, fmt) in zip(cols, metrics):
+        display = value
         if isinstance(value, (int, float)) and fmt:
             try:
-                c.metric(label, fmt.format(value))
-                continue
+                display = fmt.format(value)
             except Exception:
-                pass
-        c.metric(label, value)
+                display = value
+        display_text = str(display)
+        value_class = "qt-metric-value qt-metric-value-long" if len(display_text) > 20 else "qt-metric-value"
+        c.markdown(
+            (
+                '<div class="qt-metric-card">'
+                f'<div class="qt-metric-label">{html.escape(str(label))}</div>'
+                f'<div class="{value_class}">{html.escape(display_text)}</div>'
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 def _render_walkforward_results(run_dir: Path) -> None:
     summary_path = run_dir / "summary.json"
     config_path = run_dir / "config.json"
+    folds_path = run_dir / "folds.csv"
 
-    if not summary_path.exists() or not config_path.exists():
-        st.error("Missing `summary.json` or `config.json` in selected walk-forward run.")
+    if not summary_path.exists() or not config_path.exists() or not folds_path.exists():
+        st.error("Missing one of `summary.json`, `config.json`, `folds.csv` in selected walk-forward run.")
         return
 
     summary = _read_json(summary_path)
     config = _read_json(config_path)
-    agg = summary.get("aggregated_oos_summary", {}) or {}
-    objective = str(summary.get("objective", "return_on_account"))
-    optimization_mode = str(summary.get("optimization_mode", config.get("optimization_mode", "peak")))
-    selection_mode = str(summary.get("selection_mode", config.get("selection_mode", "peak")))
-    wf_objective = _as_float(summary.get("comparison", {}).get("walkforward_objective"))
-    baseline_objective = _as_float(summary.get("comparison", {}).get("baseline_objective"))
-    wfe_summary = summary.get("wfe", {}) if isinstance(summary.get("wfe"), dict) else {}
+    folds = pd.read_csv(folds_path)
 
     strategy_raw = str(config.get("strategy", ""))
     strategy_short = strategy_raw.rsplit(".", 1)[-1] if strategy_raw else ""
@@ -1182,283 +2290,92 @@ def _render_walkforward_results(run_dir: Path) -> None:
             if exit_name:
                 link_cols[1].markdown(_reference_link(f"Exit: {exit_name}", "exit", str(exit_name)))
 
+    profit_col = "oos_net_profit_abs" if "oos_net_profit_abs" in folds.columns else "oos_total_return_%"
+    profits_all = pd.to_numeric(folds.get(profit_col), errors="coerce").replace([np.inf, -np.inf], np.nan)
+    segment_count = int(len(folds))
+    profitable_count = int((profits_all > 0).sum()) if segment_count else 0
+    profitable_oos_pct = (100.0 * profitable_count / segment_count) if segment_count else float("nan")
+
+    profits_finite = profits_all.dropna()
+    total_oos_profit = float(profits_finite.sum()) if not profits_finite.empty else float("nan")
+    top2_sum = float(profits_finite.nlargest(min(2, len(profits_finite))).sum()) if not profits_finite.empty else float("nan")
+    if np.isfinite(total_oos_profit) and total_oos_profit > 0 and np.isfinite(top2_sum):
+        top2_share_pct = float((top2_sum / total_oos_profit) * 100.0)
+    elif segment_count > 0:
+        top2_share_pct = float("inf")
+    else:
+        top2_share_pct = float("nan")
+
+    decision = _classify_walkforward_decision(
+        segments=segment_count,
+        profitable_oos_pct=profitable_oos_pct,
+        top2_share_pct=top2_share_pct,
+    )
+    _render_decision_badge("Walk-Forward OOS Survival + Concentration", decision)
+
+    _render_metric_row(
+        [
+            ("OOS Segments", segment_count, "{:d}"),
+            ("ProfitableOOS %", profitable_oos_pct, "{:.2f}"),
+            ("Top2Share %", top2_share_pct, "{:.2f}"),
+            ("Total OOS Profit", total_oos_profit, "{:.2f}"),
+        ]
+    )
+
+    threshold_rows = pd.DataFrame(
+        [
+            {
+                "Metric": "ProfitableOOS %",
+                "Actual": "n/a" if not np.isfinite(profitable_oos_pct) else f"{profitable_oos_pct:.2f}%",
+                "PASS": ">= 60%",
+                "RETRY": "50% to <60%",
+                "FAIL": "< 50%",
+            },
+            {
+                "Metric": "Top2Share %",
+                "Actual": "n/a" if not np.isfinite(top2_share_pct) else f"{top2_share_pct:.2f}%",
+                "PASS": "<= 50%",
+                "RETRY": ">50% to <=60%",
+                "FAIL": "> 60%",
+            },
+            {
+                "Metric": "Runs Produced",
+                "Actual": f"{segment_count} OOS segments",
+                "PASS": ">= 8 segments",
+                "RETRY": "-",
+                "FAIL": "< 8 segments",
+            },
+        ]
+    )
+    st.dataframe(threshold_rows, use_container_width=True, hide_index=True)
+
+    st.subheader("OOS Segment Results")
+    view_cols = [
+        c
+        for c in [
+            "fold",
+            "oos_trades",
+            "oos_net_profit_abs",
+            "oos_total_return_%",
+            "oos_max_drawdown_abs_%",
+            "params",
+        ]
+        if c in folds.columns
+    ]
+    fold_view = folds[view_cols] if view_cols else folds
+    metric_col = "oos_net_profit_abs" if "oos_net_profit_abs" in fold_view.columns else "oos_total_return_%"
+    _render_win_loss_dataframe(fold_view, metric_col=metric_col, hide_index=True)
+
     equity_path = run_dir / "oos_equity_curve.csv"
-    trades_path = run_dir / "oos_trades.csv"
-
     eq = pd.read_csv(equity_path) if equity_path.exists() else pd.DataFrame()
-    if "time" in eq.columns:
+    if {"time", "equity"}.issubset(eq.columns):
         eq["time"] = pd.to_datetime(eq["time"], errors="coerce")
-    eq_for_metrics = eq
-    if {"time", "equity"}.issubset(eq.columns):
-        eq_for_metrics = eq.dropna(subset=["time"]).set_index("time")
-
-    trades = pd.read_csv(trades_path) if trades_path.exists() else pd.DataFrame()
-    initial_review = summary.get("initial_review", {})
-    if not isinstance(initial_review, dict) or "metrics" not in initial_review:
-        cfg_bt = config.get("backtest_config", {})
-        initial_review = build_initial_review_report(
-            equity_df=eq_for_metrics if isinstance(eq_for_metrics, pd.DataFrame) else pd.DataFrame(),
-            trades_df=trades,
-            aggregated_summary=agg,
-            initial_equity=float(cfg_bt.get("initial_equity", 100000.0)),
-            commission_per_round_trip=float(cfg_bt.get("commission_per_round_trip", 0.0)),
-            spread_pips=float(cfg_bt.get("spread_pips", 0.0)),
-        )
-
-    ir_metrics = initial_review.get("metrics", {}) if isinstance(initial_review, dict) else {}
-    ir_thresholds = initial_review.get("thresholds", {}) if isinstance(initial_review, dict) else {}
-    ir_checks = initial_review.get("checks", {}) if isinstance(initial_review, dict) else {}
-    ir_all_pass = bool(ir_checks.get("all_passed", False))
-
-    _render_metric_row(
-        [
-            ("Trades", int(agg.get("trades", 0)), "{:d}"),
-            ("Total Return %", _as_float(agg.get("total_return_%", 0.0)), "{:.2f}"),
-            ("Max DD %", _as_float(agg.get("max_drawdown_abs_%", 0.0)), "{:.2f}"),
-            ("Initial Review", _status_label(ir_all_pass), "{}"),
-        ]
-    )
-    _render_metric_row(
-        [
-            ("Win Rate %", _as_float(agg.get("win_rate_%", float("nan"))), "{:.2f}"),
-            ("CAGR %", _as_float(agg.get("cagr_%", float("nan"))), "{:.2f}"),
-            ("MAR", _as_float(agg.get("mar", float("nan"))), "{:.3f}"),
-            ("Sortino", _as_float(agg.get("sortino", float("nan"))), "{:.3f}"),
-        ]
-    )
-    st.caption(f"Optimization mode: `{optimization_mode}` | Selection mode: `{selection_mode}`")
-
-    def _money(v: Any) -> str:
-        x = _as_float(v)
-        return "n/a" if pd.isna(x) else f"${x:,.2f}"
-
-    def _pct(v: Any) -> str:
-        x = _as_float(v)
-        return "n/a" if pd.isna(x) else f"{x:.2f}%"
-
-    def _num(v: Any, nd: int = 3) -> str:
-        x = _as_float(v)
-        return "n/a" if pd.isna(x) else f"{x:.{nd}f}"
-
-    def _int(v: Any) -> int:
-        x = _as_float(v)
-        return 0 if pd.isna(x) else int(x)
-
-    max_top_trade_share_cfg = _as_float(config.get("max_top_trade_share", 1.0))
-    top_trade_share_actual = _as_float(ir_metrics.get("top_trade_share", agg.get("top_trade_share")))
-
-    st.markdown("**Initial Review (WFA)**")
-    initial_rows: list[dict[str, Any]] = [
-        {
-            "Criterion": "Total net profit",
-            "Target": f">= {_money(ir_thresholds.get('annualized_net_profit_abs_min'))}/year",
-            "Actual": (
-                f"{_money(ir_metrics.get('total_net_profit_abs'))} total | "
-                f"{_money(ir_metrics.get('annualized_net_profit_abs'))}/year"
-            ),
-            "Passed": bool(ir_checks.get("annualized_net_profit_ok", False)),
-        },
-        {
-            "Criterion": "Profit factor",
-            "Target": (
-                f">= {_num(ir_thresholds.get('profit_factor_min'), 2)} "
-                f"(ideal >= {_num(ir_thresholds.get('profit_factor_ideal'), 2)})"
-            ),
-            "Actual": _num(ir_metrics.get("profit_factor"), 3),
-            "Passed": bool(ir_checks.get("profit_factor_ok", False)),
-        },
-        {
-            "Criterion": "Average trade net profit",
-            "Target": f">= {_money(ir_thresholds.get('avg_trade_net_profit_abs_min'))}",
-            "Actual": _money(ir_metrics.get("avg_trade_net_profit_abs")),
-            "Passed": bool(ir_checks.get("avg_trade_net_profit_ok", False)),
-        },
-        {
-            "Criterion": "Outlier concentration",
-            "Target": f"top trade share <= {_num(max_top_trade_share_cfg, 2)}",
-            "Actual": _num(top_trade_share_actual, 3),
-            "Passed": bool(np.isfinite(top_trade_share_actual) and top_trade_share_actual <= max_top_trade_share_cfg),
-        },
-        {
-            "Criterion": "Tharp expectancy",
-            "Target": f">= {_num(ir_thresholds.get('tharp_expectancy_min'), 2)}",
-            "Actual": _num(ir_metrics.get("tharp_expectancy"), 3),
-            "Passed": bool(ir_checks.get("tharp_expectancy_ok", False)),
-        },
-        {
-            "Criterion": "Slippage + commission realism",
-            "Target": "non-zero costs (commission and spread)",
-            "Actual": (
-                f"commission/RT={_money(ir_metrics.get('commission_per_round_trip'))}, "
-                f"spread={_num(ir_metrics.get('spread_pips'), 3)} pips"
-            ),
-            "Passed": bool(ir_checks.get("commission_model_ok", False) and ir_checks.get("spread_model_ok", False)),
-        },
-        {
-            "Criterion": "Maximum drawdown vs net profit",
-            "Target": f"DD/NetProfit < {_num(ir_thresholds.get('drawdown_to_net_profit_ratio_max'), 2)}",
-            "Actual": (
-                f"DD={_money(ir_metrics.get('max_drawdown_abs'))} "
-                f"({_pct(ir_metrics.get('max_drawdown_abs_%'))}), "
-                f"ratio={_num(ir_metrics.get('drawdown_to_net_profit_ratio'), 3)}"
-            ),
-            "Passed": bool(ir_checks.get("drawdown_vs_profit_ok", False)),
-        },
-        {
-            "Criterion": "Equity curve slope",
-            "Target": "positive slope (45-degree ideal)",
-            "Actual": (
-                f"slope/bar={_num(ir_metrics.get('equity_slope_per_bar'), 4)}, "
-                f"angle={_num(ir_metrics.get('equity_slope_angle_deg'), 2)} deg"
-            ),
-            "Passed": bool(ir_checks.get("equity_slope_ok", False)),
-        },
-        {
-            "Criterion": "Equity curve flat periods",
-            "Target": f"flat bars ratio <= {_num(ir_thresholds.get('flat_bars_ratio_max'), 2)}",
-            "Actual": (
-                f"flat ratio={_num(ir_metrics.get('flat_bars_ratio'), 3)}, "
-                f"longest flat run={_int(ir_metrics.get('longest_flat_run_bars'))} bars"
-            ),
-            "Passed": bool(ir_checks.get("equity_flat_period_ok", False)),
-        },
-        {
-            "Criterion": "Equity drawdown depth + duration",
-            "Target": (
-                f"max DD duration ratio <= "
-                f"{_num(ir_thresholds.get('max_drawdown_duration_ratio_max'), 2)}"
-            ),
-            "Actual": (
-                f"max DD duration={_int(ir_metrics.get('max_drawdown_duration_bars'))} bars "
-                f"(ratio={_num(ir_metrics.get('max_drawdown_duration_ratio'), 3)})"
-            ),
-            "Passed": bool(ir_checks.get("equity_drawdown_duration_ok", False)),
-        },
-        {
-            "Criterion": "Equity curve fuzziness",
-            "Target": (
-                f"fuzziness <= {_num(ir_thresholds.get('equity_fuzziness_max'), 2)} "
-                f"and R^2 >= {_num(ir_thresholds.get('equity_linearity_r2_min'), 2)}"
-            ),
-            "Actual": (
-                f"fuzziness={_num(ir_metrics.get('equity_fuzziness'), 3)}, "
-                f"R^2={_num(ir_metrics.get('equity_linearity_r2'), 3)}"
-            ),
-            "Passed": bool(ir_checks.get("equity_fuzziness_ok", False) and ir_checks.get("equity_linearity_ok", False)),
-        },
-    ]
-    initial_df, initial_ok = _criteria_table(initial_rows)
-    _render_status_badge("Initial Review", initial_ok)
-    st.dataframe(initial_df, use_container_width=True, hide_index=True)
-
-    is_bars = int(config.get("is_bars", 0))
-    oos_bars = int(config.get("oos_bars", 0))
-    ratio_pct = (100.0 * oos_bars / is_bars) if is_bars > 0 else float("nan")
-    oos_under_min = int(summary.get("oos_under_min_trades_count", 0))
-    fold_count = int(summary.get("fold_count", 0))
-    wfe_metric = str(wfe_summary.get("metric", config.get("wfe_metric", "total_return_%")))
-    wfe_min_pct = _as_float(wfe_summary.get("min_pct", config.get("wfe_min_pct", 0.0)))
-    wfe_valid_count = int(wfe_summary.get("valid_fold_count", 0))
-    wfe_pass_count = int(wfe_summary.get("pass_fold_count", 0))
-    wfe_pass_rate = _as_float(wfe_summary.get("pass_rate_pct"))
-    wfe_all_valid_passed = bool(wfe_summary.get("all_valid_passed", False))
-    has_wfe = bool(wfe_summary)
-
-    execution_rows: list[dict[str, Any]] = [
-        {
-            "Criterion": "Run status is ok",
-            "Target": "status == ok",
-            "Actual": str(summary.get("status")),
-            "Passed": str(summary.get("status")) == "ok",
-        },
-        {
-            "Criterion": "OOS/IS ratio constraint",
-            "Target": "10% <= OOS/IS <= 50%",
-            "Actual": f"{ratio_pct:.2f}%",
-            "Passed": bool(10.0 <= ratio_pct <= 50.0),
-        },
-        {
-            "Criterion": "Per-fold min trades",
-            "Target": "all folds meet min trades",
-            "Actual": f"{oos_under_min} failing fold(s)",
-            "Passed": oos_under_min == 0,
-        },
-        {
-            "Criterion": "Walk-forward efficiency",
-            "Target": f"WFE({wfe_metric}) >= {wfe_min_pct:.2f}% on all valid folds",
-            "Actual": (
-                f"{wfe_pass_count}/{wfe_valid_count} valid folds pass ({_pct(wfe_pass_rate)})"
-                if has_wfe
-                else "not tracked in this run"
-            ),
-            "Passed": wfe_all_valid_passed if has_wfe else True,
-        },
-        {
-            "Criterion": "Fold count",
-            "Target": "> 0",
-            "Actual": fold_count,
-            "Passed": fold_count > 0,
-        },
-    ]
-    execution_df, execution_ok = _criteria_table(execution_rows)
-    _render_status_badge("Execution Checks", execution_ok)
-    st.dataframe(execution_df, use_container_width=True, hide_index=True)
-
-    if bool(summary.get("baseline_included")) and pd.notna(wf_objective) and pd.notna(baseline_objective):
-        delta = float(wf_objective - baseline_objective)
-        ratio = float(wf_objective / baseline_objective) if baseline_objective != 0 else float("nan")
-        baseline_df = pd.DataFrame(
-            [
-                {
-                    "Objective": objective,
-                    "Walk-forward": wf_objective,
-                    "Baseline": baseline_objective,
-                    "Delta (WF - Baseline)": delta,
-                    "WF / Baseline": ratio,
-                }
-            ]
-        )
-        st.caption(
-            "Baseline comparison is informational only. Walk-forward is expected to be lower than a full-data baseline."
-        )
-        st.dataframe(baseline_df, use_container_width=True, hide_index=True)
-
-    if {"time", "equity"}.issubset(eq.columns):
         st.subheader("OOS Equity Curve")
         if px is not None:
             fig = px.line(eq, x="time", y="equity", title="OOS Equity Curve")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.line_chart(eq.set_index("time")["equity"])
-
-    folds_path = run_dir / "folds.csv"
-    if folds_path.exists():
-        folds = pd.read_csv(folds_path)
-        st.subheader("Fold Summary")
-        if {"fold", "oos_total_return_%"}.issubset(folds.columns):
-            if px is not None:
-                fig = px.bar(folds, x="fold", y="oos_total_return_%", title="OOS Return % by Fold")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.bar_chart(folds.set_index("fold")["oos_total_return_%"])
-
-        view_cols = [
-            "fold",
-            "oos_trades",
-            "oos_total_return_%",
-            "oos_max_drawdown_abs_%",
-            "oos_win_rate_%",
-            "oos_cagr_%",
-            "oos_mar",
-            "oos_sortino",
-            "oos_return_on_account",
-            "wfe_pct",
-            "wfe_pass",
-            "oos_min_trades_met",
-        ]
-        existing = [c for c in view_cols if c in folds.columns]
-        fold_view = folds[existing] if existing else folds
-        _render_win_loss_dataframe(fold_view, metric_col="oos_total_return_%", hide_index=True)
 
     html_path = run_dir / "oos_equity_interactive.html"
     if html_path.exists():
@@ -1473,89 +2390,116 @@ def _render_mc_results(mc_run_dir: Path) -> None:
 
     summary = _read_json(summary_path)
     metrics = summary.get("metrics", {})
-    thresholds = summary.get("thresholds", {})
-    checks = summary.get("threshold_checks", {})
+    mc_cfg = summary.get("config", {}) if isinstance(summary.get("config"), dict) else {}
+    run_dir_raw = str(summary.get("run_dir", "")).strip()
+    wf_run_dir = _abs_path(run_dir_raw) if run_dir_raw else None
 
     st.subheader("Monte Carlo Result")
-    st.markdown("**Detailed Review (Monte Carlo)**")
-    _render_metric_row(
-        [
-            ("Risk of Ruin %", _as_float(metrics.get("risk_of_ruin_pct", 0.0)), "{:.2f}"),
-            ("Median Return %", _as_float(metrics.get("median_return_%", 0.0)), "{:.2f}"),
-            ("Median Max DD %", _as_float(metrics.get("median_max_drawdown_%", 0.0)), "{:.2f}"),
-            (
-                "Return/DD Ratio",
-                _as_float(metrics.get("return_drawdown_ratio_ratio_of_medians", 0.0)),
-                "{:.3f}",
-            ),
-        ]
-    )
-    _render_metric_row(
-        [
-            ("Median Win Rate %", _as_float(metrics.get("median_win_rate_%", float("nan"))), "{:.2f}"),
-            ("Median CAGR %", _as_float(metrics.get("median_cagr_%", float("nan"))), "{:.2f}"),
-            ("Median MAR", _as_float(metrics.get("median_mar", float("nan"))), "{:.3f}"),
-            ("Median Sortino", _as_float(metrics.get("median_sortino", float("nan"))), "{:.3f}"),
-        ]
-    )
-
-    criteria_rows = [
-        {
-            "Criterion": "Risk of ruin",
-            "Target": f"< {thresholds.get('risk_of_ruin_pct_max', 'n/a')}%",
-            "Actual": f"{_as_float(metrics.get('risk_of_ruin_pct')):.2f}%",
-            "Passed": bool(checks.get("risk_of_ruin_ok", False)),
-        },
-        {
-            "Criterion": "Median max drawdown",
-            "Target": f"< {thresholds.get('median_max_drawdown_pct_max', 'n/a')}%",
-            "Actual": f"{_as_float(metrics.get('median_max_drawdown_%')):.2f}%",
-            "Passed": bool(checks.get("median_max_drawdown_ok", False)),
-        },
-        {
-            "Criterion": "Median return",
-            "Target": f"> {thresholds.get('median_return_pct_min', 'n/a')}%",
-            "Actual": f"{_as_float(metrics.get('median_return_%')):.2f}%",
-            "Passed": bool(checks.get("median_return_ok", False)),
-        },
-        {
-            "Criterion": "Return/Drawdown ratio",
-            "Target": f"> {thresholds.get('return_drawdown_ratio_min', 'n/a')}",
-            "Actual": f"{_as_float(metrics.get('return_drawdown_ratio_ratio_of_medians')):.3f}",
-            "Passed": bool(checks.get("return_drawdown_ratio_ok", False)),
-        },
-    ]
-
-    criteria_df, criteria_ok = _criteria_table(criteria_rows)
-    _render_status_badge("Overall Status", criteria_ok)
-    st.dataframe(criteria_df, use_container_width=True, hide_index=True)
+    st.markdown("**DD + Outlier Dependence**")
 
     sims_path = mc_run_dir / "mc_simulations.csv"
-    if sims_path.exists():
-        sims = pd.read_csv(sims_path)
-        st.subheader("Distribution")
-        if "return_%" in sims.columns:
-            _render_histogram(sims["return_%"], title="Return % Distribution", bins=70)
+    sims = pd.read_csv(sims_path) if sims_path.exists() else pd.DataFrame()
+
+    dd95_pct = _as_float(metrics.get("max_drawdown_%_p95"))
+    if not np.isfinite(dd95_pct) and "max_drawdown_%" in sims.columns:
+        dd95_pct = _as_float(pd.to_numeric(sims["max_drawdown_%"], errors="coerce").quantile(0.95))
+
+    ddoos_pct = float("nan")
+    original_oos_profit = float("nan")
+    profit_after_top3_removal = float("nan")
+    pnl_col = ""
+    if wf_run_dir is not None:
+        wf_summary_path = wf_run_dir / "summary.json"
+        if wf_summary_path.exists():
+            wf_summary = _read_json(wf_summary_path)
+            agg = wf_summary.get("aggregated_oos_summary", {}) if isinstance(wf_summary.get("aggregated_oos_summary"), dict) else {}
+            ddoos_pct = _as_float(agg.get("max_drawdown_abs_%"))
+
+        if not np.isfinite(ddoos_pct):
+            oos_eq_path = wf_run_dir / "oos_equity_curve.csv"
+            if oos_eq_path.exists():
+                eq = pd.read_csv(oos_eq_path)
+                if "equity" in eq.columns:
+                    ddoos_pct = _max_drawdown_pct_from_equity_series(eq["equity"])
+
+        oos_trades_path = wf_run_dir / "oos_trades.csv"
+        if oos_trades_path.exists():
+            oos_trades = pd.read_csv(oos_trades_path)
+            for candidate in ("pnl", "net_profit", "profit", "net_profit_abs"):
+                if candidate in oos_trades.columns:
+                    pnl_col = candidate
+                    break
+            if pnl_col:
+                pnl_s = pd.to_numeric(oos_trades[pnl_col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+                if not pnl_s.empty:
+                    original_oos_profit = float(pnl_s.sum())
+                    top_n = min(3, len(pnl_s))
+                    drop_idx = pnl_s.nlargest(top_n).index
+                    profit_after_top3_removal = float(pnl_s.drop(index=drop_idx, errors="ignore").sum())
+
+    dd_ratio = (
+        float(dd95_pct / ddoos_pct)
+        if np.isfinite(dd95_pct) and np.isfinite(ddoos_pct) and ddoos_pct > 0
+        else float("nan")
+    )
+    decision = _classify_monte_carlo_risk_decision(
+        dd_ratio=dd_ratio,
+        original_profit=original_oos_profit,
+        profit_after_removal=profit_after_top3_removal,
+    )
+    _render_decision_badge("Monte Carlo Risk (DD + Outlier Dependence)", decision)
+
+    _render_metric_row(
+        [
+            ("MC DD95 %", dd95_pct, "{:.2f}"),
+            ("OOS DDOOS %", ddoos_pct, "{:.2f}"),
+            ("DD95/DDOOS", dd_ratio, "{:.3f}"),
+            ("MC Simulations", int(mc_cfg.get("n_sims", len(sims))), "{:d}"),
+        ]
+    )
+    _render_metric_row(
+        [
+            ("Original OOS Profit", original_oos_profit, "{:.2f}"),
+            ("Profit After Top-3 Removal", profit_after_top3_removal, "{:.2f}"),
+            ("Outlier Removal Calc", 1, "{:d}"),
+            ("Trade PnL Column", pnl_col or "missing", "{}"),
+        ]
+    )
+    threshold_df = pd.DataFrame(
+        [
+            {
+                "Metric": "DD95/DDOOS",
+                "Actual": "n/a" if not np.isfinite(dd_ratio) else f"{dd_ratio:.3f}",
+                "PASS": "<= 1.7x",
+                "RETRY": ">1.7x to <=2.0x",
+                "FAIL": "> 2.0x",
+            },
+            {
+                "Metric": "NetProfitAfterRemoval",
+                "Actual": "n/a" if not np.isfinite(profit_after_top3_removal) else f"{profit_after_top3_removal:,.2f}",
+                "PASS": "> 0",
+                "RETRY": "<=0 but > -10% of original OOS profit",
+                "FAIL": "<= -10% of original OOS profit",
+            },
+            {
+                "Metric": "Runs Produced",
+                "Actual": f"{int(mc_cfg.get('n_sims', len(sims)))} sims + 1 removal calc",
+                "PASS": "10,000 sims + 1 removal calc",
+                "RETRY": "-",
+                "FAIL": "far below target sims",
+            },
+        ]
+    )
+    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+
+    if not sims.empty:
+        st.subheader("DD Distribution")
         if "max_drawdown_%" in sims.columns:
             _render_histogram(sims["max_drawdown_%"], title="Max Drawdown % Distribution", bins=70)
-        st.subheader("Simulation Outcomes")
-        sim_cols = [
-            c
-            for c in [
-                "sim",
-                "return_%",
-                "max_drawdown_%",
-                "win_rate_%",
-                "cagr_%",
-                "mar",
-                "sortino",
-                "ruin_hit",
-                "final_equity",
-            ]
-            if c in sims.columns
-        ]
+        sim_cols = [c for c in ["sim", "max_drawdown_%", "return_%", "final_equity"] if c in sims.columns]
         sims_view = sims[sim_cols] if sim_cols else sims
-        _render_win_loss_dataframe(sims_view, metric_col="return_%", hide_index=True)
+        metric_col = "return_%" if "return_%" in sims_view.columns else sim_cols[1] if len(sim_cols) > 1 else sims_view.columns[0]
+        _render_win_loss_dataframe(sims_view, metric_col=metric_col, hide_index=True)
 
     q_path = mc_run_dir / "mc_paths_quantiles.csv"
     if q_path.exists():
@@ -1588,13 +2532,6 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
     pass_summary = _read_json(pass_path)
     run_meta = _read_json(meta_path)
 
-    favourable_pct = _as_float(pass_summary.get("favourable_pct", 0.0))
-    pass_threshold = _as_float(pass_summary.get("pass_threshold_%", 0.0))
-    min_trades = int(pass_summary.get("min_trades", run_meta.get("min_trades", 0)))
-    criteria_cfg = run_meta.get("criteria", {"mode": "all", "rules": []})
-    mode = str(criteria_cfg.get("mode", "all"))
-    rules = criteria_cfg.get("rules", [])
-
     st.subheader("Limited Test Result")
     c_rerun, _ = st.columns([0.2, 0.8])
     rerun_key = f"limited_rerun_{_safe_key_from_path('run', run_dir)}"
@@ -1605,94 +2542,325 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
                 pass_summary=pass_summary,
                 strategy_catalog=strategy_catalog,
             )
-            st.session_state["_force_nav_page"] = "run_tests"
+            st.session_state["_force_nav_page"] = "run_test"
             st.rerun()
         except Exception as e:
             st.error(f"Unable to prefill rerun form: {e}")
 
-    _render_metric_row(
-        [
-            ("Favourable %", favourable_pct, "{:.2f}"),
-            ("Pass Threshold %", pass_threshold, "{:.2f}"),
-            ("Iterations", int(pass_summary.get("total_iters", len(results))), "{:d}"),
-        ]
-    )
-    _render_status_badge("Run Pass Threshold (Favourable %)", bool(pass_summary.get("passed", False)))
-    if isinstance(rules, list) and rules:
-        rule_text = "; ".join(
-            f"{str(r.get('metric', '?'))} {str(r.get('op', '?'))} {str(r.get('value', '?'))}"
-            for r in rules
-            if isinstance(r, dict)
-        )
-    else:
-        rule_text = "no criteria rules found"
-    st.caption(
-        "Pass-threshold metric: `favourable %` = % of iterations where "
-        f"`trades >= {min_trades}` and criteria mode `{mode}` is satisfied "
-        f"(`{rule_text}`). Final pass requires `favourable % >= {pass_threshold:.2f}%`."
-    )
-    _render_metric_row(
-        [
-            ("Median Win Rate %", _median_numeric(results, "win_rate_%"), "{:.2f}"),
-            ("Median CAGR %", _median_numeric(results, "cagr_%"), "{:.2f}"),
-            ("Median MAR", _median_numeric(results, "mar"), "{:.3f}"),
-            ("Median Sortino", _median_numeric(results, "sortino"), "{:.3f}"),
-        ]
-    )
-    _render_limited_atr_robustness(results)
+    _render_limited_test_param_space(run_meta)
 
-    criteria_rows: list[dict[str, Any]] = [
-        {
-            "Criterion": "Combined favourable rate",
-            "Target": f">= {pass_threshold:.2f}%",
-            "Actual": f"{favourable_pct:.2f}%",
-            "Passed": favourable_pct >= pass_threshold,
-        }
-    ]
+    spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
+    initial_equity = _infer_initial_equity_from_spec(spec)
+    results = results.copy()
+    results["_net_profit_abs"] = _limited_net_profit_series(results, initial_equity=initial_equity)
+    total_iters = int(len(results))
 
-    if "trades" in results.columns:
-        trades_met_pct = float((pd.to_numeric(results["trades"], errors="coerce") >= min_trades).mean() * 100.0)
-        criteria_rows.append(
-            {
-                "Criterion": "Min trades constraint hit rate",
-                "Target": f"trades >= {min_trades}",
-                "Actual": f"{trades_met_pct:.2f}% iterations",
-                "Passed": trades_met_pct > 0.0,
-            }
-        )
-
-    for idx, rule in enumerate(rules, start=1):
-        metric = str(rule.get("metric", ""))
-        op = str(rule.get("op", ""))
-        value = rule.get("value")
-
-        if metric in results.columns:
-            pass_mask = _evaluate_series_rule(results[metric], op, value)
-            pass_pct = float(pass_mask.mean() * 100.0)
-            actual_txt = f"{pass_pct:.2f}% iterations pass"
-            passed = pass_pct >= pass_threshold
+    is_monkey = _is_monkey_limited_run(run_meta)
+    if is_monkey:
+        davey_cfg = pass_summary.get("davey_style", {})
+        davey_enabled = isinstance(davey_cfg, dict) and bool(davey_cfg.get("enabled", False))
+        pass_threshold = _as_float(pass_summary.get("pass_threshold_%"))
+        if davey_enabled:
+            ret_worse_pct = _as_float(davey_cfg.get("return_worse_pct"))
+            dd_worse_pct = _as_float(davey_cfg.get("maxdd_worse_pct"))
+            both_worse_pct = _as_float(davey_cfg.get("both_worse_pct", pass_summary.get("favourable_pct")))
+            decision = "PASS" if bool(pass_summary.get("passed", False)) else "FAIL"
+            _render_decision_badge("Monkey Test (Strict Davey Style)", decision)
+            _render_metric_row(
+                [
+                    ("Runs Produced", total_iters, "{:d}"),
+                    ("Return Worse %", ret_worse_pct, "{:.2f}"),
+                    ("MaxDD Worse %", dd_worse_pct, "{:.2f}"),
+                    ("Pass Threshold %", pass_threshold, "{:.2f}"),
+                ]
+            )
+            _render_metric_row(
+                [
+                    ("Both Worse %", both_worse_pct, "{:.2f}"),
+                    ("Target Trials", 8000, "{:d}"),
+                    ("PASS Floor %", pass_threshold, "{:.0f}"),
+                    ("Decision Rule", "Return Worse% >= floor AND MaxDD Worse% >= floor", "{}"),
+                ]
+            )
+            monkey_df = pd.DataFrame(
+                [
+                    {
+                        "Metric": "Return Worse % (trial return < baseline return)",
+                        "Actual": "n/a" if not np.isfinite(ret_worse_pct) else f"{ret_worse_pct:.2f}%",
+                        "PASS": f">= {pass_threshold:.0f}%",
+                        "FAIL": f"< {pass_threshold:.0f}%",
+                    },
+                    {
+                        "Metric": "MaxDD Worse % (trial MaxDD > baseline MaxDD)",
+                        "Actual": "n/a" if not np.isfinite(dd_worse_pct) else f"{dd_worse_pct:.2f}%",
+                        "PASS": f">= {pass_threshold:.0f}%",
+                        "FAIL": f"< {pass_threshold:.0f}%",
+                    },
+                    {
+                        "Metric": "Both Worse % (informational)",
+                        "Actual": "n/a" if not np.isfinite(both_worse_pct) else f"{both_worse_pct:.2f}%",
+                        "PASS": "n/a",
+                        "FAIL": "n/a",
+                    },
+                ]
+            )
+            st.dataframe(monkey_df, use_container_width=True, hide_index=True)
         else:
-            actual_txt = "metric missing in limited_results.csv"
-            passed = False
+            dominance_pct = _as_float(pass_summary.get("favourable_pct"))
+            decision = _classify_monkey_dominance_decision(dominance_pct)
+            _render_decision_badge("Monkey Test (Dominance Criteria)", decision)
+            _render_metric_row(
+                [
+                    ("Runs Produced", total_iters, "{:d}"),
+                    ("Dominance %", dominance_pct, "{:.2f}"),
+                    ("Pass Threshold %", pass_threshold, "{:.2f}"),
+                    ("Target Trials", 8000, "{:d}"),
+                ]
+            )
+            _render_metric_row(
+                [
+                    ("PASS Floor %", 85.0, "{:.0f}"),
+                    ("RETRY Floor %", 75.0, "{:.0f}"),
+                    ("Test Window", "same as Limited Core", "{}"),
+                    ("Decision Rule", "dominance >= 85 PASS / >= 75 RETRY", "{}"),
+                ]
+            )
+            monkey_df = pd.DataFrame(
+                [
+                    {
+                        "Metric": "Dominance % (return worse AND MaxDD worse)",
+                        "Actual": "n/a" if not np.isfinite(dominance_pct) else f"{dominance_pct:.2f}%",
+                        "PASS": ">= 85%",
+                        "RETRY": "75% to <85%",
+                        "FAIL": "< 75%",
+                    },
+                    {
+                        "Metric": "Runs Produced",
+                        "Actual": f"{total_iters} trials",
+                        "PASS": "8,000 trials",
+                        "RETRY": "-",
+                        "FAIL": "far below target trials",
+                    },
+                ]
+            )
+            st.dataframe(monkey_df, use_container_width=True, hide_index=True)
 
-        criteria_rows.append(
-            {
-                "Criterion": f"Rule {idx} ({mode})",
-                "Target": f"{metric} {op} {value}",
-                "Actual": actual_txt,
-                "Passed": passed,
-            }
+        with st.expander("Constrained Dominance (Baseline-matched monkey trials)", expanded=True):
+            st.caption(
+                "Post-filter monkey trials to baseline-matching trade count and long/short mix, "
+                "then compute dominance % on that filtered subset."
+            )
+            baseline_run_candidates = [p for p in _discover_limited_runs() if p.resolve() != run_dir.resolve()]
+            baseline_opts = [_rel(p) for p in baseline_run_candidates]
+            default_baseline = baseline_opts[0] if baseline_opts else ""
+            baseline_run_raw = _select_path_from_options(
+                "Baseline limited run (core fixed strategy)",
+                baseline_opts,
+                default_baseline,
+                key_prefix=f"monkey_base_{_safe_key_from_path('run', run_dir)}",
+            )
+
+            ctol1, ctol2 = st.columns(2)
+            trade_tol_pct = float(
+                ctol1.number_input(
+                    "Trade count tolerance %",
+                    min_value=0.0,
+                    value=5.0,
+                    step=0.5,
+                    key=f"monkey_trade_tol_{run_dir.as_posix()}",
+                )
+            )
+            long_tol_pp = float(
+                ctol2.number_input(
+                    "Long ratio tolerance (percentage points)",
+                    min_value=0.0,
+                    value=5.0,
+                    step=0.5,
+                    key=f"monkey_long_tol_{run_dir.as_posix()}",
+                )
+            )
+
+            if baseline_run_raw.strip():
+                base_run_dir = _abs_path(baseline_run_raw.strip())
+                loaded = _load_limited_run_artifacts(base_run_dir)
+                if loaded is None:
+                    st.error("Could not load baseline limited run artifacts.")
+                else:
+                    base_results, base_meta, _base_pass = loaded
+                    iter_values: list[int] = []
+                    if "iter" in base_results.columns:
+                        iter_values = (
+                            pd.to_numeric(base_results["iter"], errors="coerce")
+                            .dropna()
+                            .astype(int)
+                            .drop_duplicates()
+                            .sort_values()
+                            .tolist()
+                        )
+                    selected_base_iter: int | None = None
+                    if len(iter_values) > 1:
+                        selected_base_iter = st.selectbox(
+                            "Baseline iteration",
+                            iter_values,
+                            index=0,
+                            key=f"monkey_base_iter_{run_dir.as_posix()}",
+                        )
+                    baseline_row = _pick_limited_row(base_results, iter_id=selected_base_iter)
+                    if baseline_row is None:
+                        st.error("Baseline run has no rows in `limited_results.csv`.")
+                    else:
+                        base_initial_eq = _infer_initial_equity_from_spec(base_meta.get("spec", {}) if isinstance(base_meta, dict) else {})
+                        baseline = _limited_baseline_metrics_from_row(baseline_row, initial_equity=base_initial_eq)
+
+                        _render_metric_row(
+                            [
+                                ("Baseline Trades", baseline.get("trades", float("nan")), "{:.0f}"),
+                                ("Baseline Long %", baseline.get("long_trade_pct", float("nan")), "{:.2f}"),
+                                ("Baseline Return %", baseline.get("total_return_%", float("nan")), "{:.2f}"),
+                                ("Baseline MaxDD %", baseline.get("max_drawdown_abs_%", float("nan")), "{:.2f}"),
+                            ]
+                        )
+
+                        constrained = _compute_monkey_constrained_dominance(
+                            monkey_results=results,
+                            baseline_return_pct=float(baseline.get("total_return_%", float("nan"))),
+                            baseline_max_dd_pct=float(baseline.get("max_drawdown_abs_%", float("nan"))),
+                            baseline_trades=float(baseline.get("trades", float("nan"))),
+                            baseline_long_trade_pct=float(baseline.get("long_trade_pct", float("nan"))),
+                            trade_count_tol_pct=float(trade_tol_pct),
+                            long_ratio_tol_pp=float(long_tol_pp),
+                        )
+                        constrained_dominance_pct = _as_float(constrained.get("dominance_valid_pct"))
+                        constrained_decision = _classify_monkey_dominance_decision(constrained_dominance_pct)
+                        _render_decision_badge("Constrained Dominance (filtered trials)", constrained_decision)
+                        _render_metric_row(
+                            [
+                                ("Valid Trials", int(constrained.get("valid_trials", 0)), "{:d}"),
+                                ("Valid %", _as_float(constrained.get("valid_pct")), "{:.2f}"),
+                                ("Dominance on Valid %", constrained_dominance_pct, "{:.2f}"),
+                                ("Target Valid Trials", 8000, "{:d}"),
+                            ]
+                        )
+                        _render_metric_row(
+                            [
+                                ("PASS Floor %", 85.0, "{:.0f}"),
+                                ("RETRY Floor %", 75.0, "{:.0f}"),
+                                ("Trade Tol %", float(trade_tol_pct), "{:.1f}"),
+                                ("Long Ratio Tol pp", float(long_tol_pp), "{:.1f}"),
+                            ]
+                        )
+                        filt_df = pd.DataFrame(
+                            [
+                                {
+                                    "Metric": "Trade count filter",
+                                    "Actual": (
+                                        f"[{_as_float(constrained.get('trade_low')):.1f}, "
+                                        f"{_as_float(constrained.get('trade_high')):.1f}]"
+                                    ),
+                                    "Rule": f"baseline trades ±{trade_tol_pct:.1f}%",
+                                },
+                                {
+                                    "Metric": "Long ratio filter",
+                                    "Actual": (
+                                        f"[{_as_float(constrained.get('long_low')):.1f}%, "
+                                        f"{_as_float(constrained.get('long_high')):.1f}%]"
+                                    ),
+                                    "Rule": f"baseline long_trade_pct ±{long_tol_pp:.1f} pp",
+                                },
+                                {
+                                    "Metric": "Dominance on filtered trials",
+                                    "Actual": (
+                                        "n/a"
+                                        if not np.isfinite(constrained_dominance_pct)
+                                        else f"{constrained_dominance_pct:.2f}%"
+                                    ),
+                                    "Rule": "trial return < baseline return AND trial MaxDD > baseline MaxDD",
+                                },
+                            ]
+                        )
+                        st.dataframe(filt_df, use_container_width=True, hide_index=True)
+                        st.caption(
+                            "Current runner does not hard-resample until 8,000 valid constrained trials; "
+                            "this view computes constrained dominance by filtering generated trials."
+                        )
+    else:
+        net_profit = pd.to_numeric(results["_net_profit_abs"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        trades_s = pd.to_numeric(results.get("trades", pd.Series(dtype=float)), errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+        profitable_runs = int((net_profit > 0).sum()) if not net_profit.empty else 0
+        median_profit = float(net_profit.median()) if not net_profit.dropna().empty else float("nan")
+        median_trades = float(trades_s.median()) if not trades_s.dropna().empty else float("nan")
+        best_profit = float(net_profit.max()) if not net_profit.dropna().empty else float("nan")
+        best_over_median = (
+            float(best_profit / median_profit)
+            if np.isfinite(best_profit) and np.isfinite(median_profit) and median_profit > 0
+            else float("inf")
         )
 
-    criteria_df, criteria_ok = _criteria_table(criteria_rows)
-    _render_status_badge("Overall Status", criteria_ok)
-    st.dataframe(criteria_df, use_container_width=True, hide_index=True)
+        decision = _classify_limited_core_decision(
+            profitable_runs=profitable_runs,
+            median_profit=median_profit,
+            median_trades=median_trades,
+            best_over_median=best_over_median,
+        )
+        _render_decision_badge("Limited Core Test (Grid + Robustness)", decision)
+        _render_metric_row(
+            [
+                ("Runs Produced", total_iters, "{:d}"),
+                ("ProfitableRuns", profitable_runs, "{:d}"),
+                ("MedianProfit", median_profit, "{:.2f}"),
+                ("MedianTrades", median_trades, "{:.1f}"),
+            ]
+        )
+        _render_metric_row(
+            [
+                ("BestOverMedian", best_over_median, "{:.3f}"),
+                ("BestProfit", best_profit, "{:.2f}"),
+                ("Target Backtests", 100, "{:d}"),
+                ("NetProfit Basis", f"initial_equity={initial_equity:,.0f}", "{}"),
+            ]
+        )
 
-    st.subheader("Distribution")
-    if "total_return_%" in results.columns:
-        _render_histogram(results["total_return_%"], title="total_return_% distribution", bins=60)
-    if "max_drawdown_abs_%" in results.columns:
-        _render_histogram(results["max_drawdown_abs_%"], title="max_drawdown_abs_% distribution", bins=60)
+        core_df = pd.DataFrame(
+            [
+                {
+                    "Metric": "ProfitableRuns",
+                    "Actual": f"{profitable_runs}",
+                    "PASS": ">= 70",
+                    "RETRY": "50 to 69",
+                    "FAIL": "< 50",
+                },
+                {
+                    "Metric": "MedianProfit",
+                    "Actual": "n/a" if not np.isfinite(median_profit) else f"{median_profit:,.2f}",
+                    "PASS": "> 0",
+                    "RETRY": "must remain > 0",
+                    "FAIL": "<= 0",
+                },
+                {
+                    "Metric": "MedianTrades",
+                    "Actual": "n/a" if not np.isfinite(median_trades) else f"{median_trades:.1f}",
+                    "PASS": ">= 75",
+                    "RETRY": "30 to 74",
+                    "FAIL": "< 30",
+                },
+                {
+                    "Metric": "BestOverMedian",
+                    "Actual": "inf" if not np.isfinite(best_over_median) else f"{best_over_median:.3f}",
+                    "PASS": "<= 3.0",
+                    "RETRY": ">3.0 to <=5.0",
+                    "FAIL": "> 5.0",
+                },
+                {
+                    "Metric": "Runs Produced",
+                    "Actual": f"{total_iters} backtests",
+                    "PASS": "100 backtests",
+                    "RETRY": "-",
+                    "FAIL": "far below target backtests",
+                },
+            ]
+        )
+        st.dataframe(core_df, use_container_width=True, hide_index=True)
 
     st.subheader("Iterations")
     iter_cols = [
@@ -1701,20 +2869,16 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
             "iter",
             "favourable",
             "trades",
+            "_net_profit_abs",
             "total_return_%",
             "max_drawdown_abs_%",
-            "profit_factor",
-            "win_rate_%",
-            "cagr_%",
-            "mar",
-            "sortino",
             "entry_params",
             "exit_params",
         ]
         if c in results.columns
     ]
     iter_view = results[iter_cols] if iter_cols else results
-    _render_win_loss_dataframe(iter_view, metric_col="total_return_%", hide_index=True)
+    _render_win_loss_dataframe(iter_view, metric_col="_net_profit_abs", hide_index=True)
 
     if trades_path.exists():
         trades = pd.read_csv(trades_path)
@@ -1740,19 +2904,36 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
                         [
                             ("Iter", int(selected_iter), "{:d}"),
                             ("Favourable", _status_label(bool(r.get("favourable", False))), "{}"),
+                            ("Net Profit", float(r.get("_net_profit_abs", float("nan"))), "{:.2f}"),
                             ("Trades", trades_n, "{:d}"),
-                            ("Return %", float(r.get("total_return_%", float("nan"))), "{:.2f}"),
-                            ("Max DD %", float(r.get("max_drawdown_abs_%", float("nan"))), "{:.2f}"),
+                            ("BestOverMedian Ref", "see scorecard", "{}"),
                         ]
                     )
-                    _render_metric_row(
-                        [
-                            ("Win Rate %", float(r.get("win_rate_%", float("nan"))), "{:.2f}"),
-                            ("CAGR %", float(r.get("cagr_%", float("nan"))), "{:.2f}"),
-                            ("MAR", float(r.get("mar", float("nan"))), "{:.3f}"),
-                            ("Sortino", float(r.get("sortino", float("nan"))), "{:.3f}"),
-                        ]
-                    )
+
+                open_chart_key = (
+                    f"limited_open_iter_chart_"
+                    f"{_safe_key_from_path('run', run_dir)}_{int(selected_iter)}"
+                )
+                if st.button(
+                    "Open iteration candlestick chart",
+                    key=open_chart_key,
+                    type="primary",
+                ):
+                    with st.spinner("Preparing iteration candlestick chart..."):
+                        ok, chart_or_msg = _ensure_limited_iteration_chart(
+                            run_dir=run_dir,
+                            iter_id=int(selected_iter),
+                        )
+                    if ok:
+                        chart_path = chart_or_msg if isinstance(chart_or_msg, Path) else _abs_path(str(chart_or_msg))
+                        try:
+                            st.query_params["page"] = "html_view"
+                            st.query_params["html_file"] = _rel(chart_path)
+                        except Exception:
+                            pass
+                        st.rerun()
+                    else:
+                        st.error(str(chart_or_msg))
 
                 trades_iter = trades.loc[pd.to_numeric(trades["iter"], errors="coerce") == int(selected_iter)].copy()
                 if trades_iter.empty:
@@ -1785,38 +2966,6 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
                     ]
                     trades_view = trades_iter[trade_cols] if trade_cols else trades_iter
                     _render_win_loss_dataframe(trades_view, metric_col="pnl", hide_index=True, max_styled_rows=5000)
-
-                st.markdown("**Iteration Candle Overlay**")
-                iter_chart_path = run_dir / f"iteration_{int(selected_iter)}_lightweight.html"
-                build_key = f"limited_build_iter_chart_{run_dir.as_posix()}_{int(selected_iter)}"
-                if st.button("Build / Refresh Lightweight Chart", key=build_key):
-                    cmd = [
-                        SCRIPT_PYTHON,
-                        str(SCRIPTS_DIR / "plot_limited_iteration_lightweight.py"),
-                        "--run-dir",
-                        run_dir.as_posix(),
-                        "--iter",
-                        str(int(selected_iter)),
-                        "--max-bars",
-                        "3000",
-                        "--max-liq-lines",
-                        "0",
-                        "--max-visible-liq-lines",
-                        "180",
-                    ]
-                    rc, out = _run_cli_live(cmd, workflow="limited")
-                    if rc == 0:
-                        parsed = _extract_path_after_marker(out, "Saved lightweight chart:")
-                        if parsed is not None:
-                            iter_chart_path = parsed
-                        st.success(f"Generated lightweight chart: `{_rel(iter_chart_path)}`")
-                    else:
-                        st.error("Failed to generate iteration lightweight chart.")
-
-                if iter_chart_path.exists():
-                    _render_saved_interactive_html(iter_chart_path)
-                else:
-                    st.info("No lightweight chart generated yet. Click 'Build / Refresh Lightweight Chart'.")
             else:
                 st.info("No iteration ids available in results.")
         else:
@@ -1827,6 +2976,296 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
     html_path = run_dir / "limited_interactive.html"
     if html_path.exists():
         _render_saved_interactive_html(html_path)
+
+
+def _render_limited_workbook_summary(run_dir: Path, *, strategy_catalog: dict[str, dict[str, Any]]) -> None:
+    """Render a compact summary of a limited test run, suitable for the run-test page."""
+    try:
+        summary = load_limited_summary(run_dir)
+    except FileNotFoundError:
+        st.warning("Incomplete limited test run outputs. Run the test to generate results.")
+        return
+
+    decision = summary.get("decision")
+    criteria = summary.get("criteria") or {}
+    pass_threshold = summary.get("pass_threshold")
+    min_trades = summary.get("min_trades")
+    is_monkey = summary.get("is_monkey", False)
+    metrics = summary.get("metrics", {})
+
+    _render_decision_badge("Limited test decision", decision)
+
+    st.markdown("**Pass / threshold inputs used**")
+    st.write(f"- Favourable criteria: `{json.dumps(criteria) if criteria else '{}'}'`")
+    st.write(f"- Pass threshold (%): {pass_threshold}")
+    st.write(f"- Min trades: {min_trades}")
+
+    if is_monkey:
+        _render_metric_row(
+            [
+                ("Total trials", metrics.get("total_trials"), "{:d}"),
+                ("Return worse %", metrics.get("davey_return_worse_pct"), "{:.2f}"),
+                ("MaxDD worse %", metrics.get("davey_maxdd_worse_pct"), "{:.2f}"),
+                ("Pass threshold %", _as_float(pass_threshold), "{:.2f}"),
+            ]
+        )
+    else:
+        _render_metric_row(
+            [
+                ("Runs produced", metrics.get("total_iters"), "{:d}"),
+                ("Profitable runs", metrics.get("profitable_runs"), "{:d}"),
+                ("Median profit", metrics.get("median_profit"), "{:.2f}"),
+                ("Median trades", metrics.get("median_trades"), "{:.1f}"),
+            ]
+        )
+
+    st.subheader("Detailed iteration table")
+    results_path = run_dir / "limited_results.csv"
+    if not results_path.exists():
+        st.info("Results CSV missing; re-run the test to generate iteration-level details.")
+        return
+
+    results = pd.read_csv(results_path)
+    iter_cols = [
+        c
+        for c in [
+            "iter",
+            "favourable",
+            "trades",
+            "_net_profit_abs",
+            "total_return_%",
+            "max_drawdown_abs_%",
+            "entry_params",
+            "exit_params",
+        ]
+        if c in results.columns
+    ]
+    iter_view = results[iter_cols] if iter_cols else results
+    _render_win_loss_dataframe(iter_view, metric_col="_net_profit_abs", hide_index=True)
+
+
+
+def _render_walkforward_workbook_summary(run_dir: Path) -> None:
+    try:
+        summary_data = load_walkforward_summary(run_dir)
+    except FileNotFoundError:
+        st.warning("Incomplete walk-forward run outputs. Run the walk-forward test to generate summary.")
+        return
+
+    summary = summary_data.get("summary", {})
+    segment_count = summary_data.get("segment_count", 0)
+    profitable_pct = summary_data.get("profitable_pct", float("nan"))
+    top2_share_pct = summary_data.get("top2_share_pct", float("nan"))
+
+    decision = _classify_walkforward_decision(
+        segments=segment_count,
+        profitable_oos_pct=profitable_pct,
+        top2_share_pct=top2_share_pct,
+    )
+    _render_decision_badge("Walk-forward OOS Survival + Concentration", decision)
+
+    st.markdown("**Walk-forward pass/fail thresholds (reference)**")
+    threshold_df = pd.DataFrame(
+        [
+            {
+                "Metric": "ProfitableOOS %",
+                "Actual": "n/a" if not np.isfinite(profitable_pct) else f"{profitable_pct:.2f}%",
+                "PASS": ">= 60%",
+                "RETRY": "50% to <60%",
+                "FAIL": "< 50%",
+            },
+            {
+                "Metric": "Top2Share %",
+                "Actual": "n/a" if not np.isfinite(top2_share_pct) else f"{top2_share_pct:.2f}%",
+                "PASS": "<= 50%",
+                "RETRY": ">50% to <=60%",
+                "FAIL": "> 60%",
+            },
+            {
+                "Metric": "Runs Produced",
+                "Actual": f"{segment_count} OOS segments",
+                "PASS": ">= 8 segments",
+                "RETRY": "-",
+                "FAIL": "< 8 segments",
+            },
+        ]
+    )
+    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+
+    wfe = summary.get("wfe", {})
+    if isinstance(wfe, dict) and wfe:
+        st.markdown("**WFE summary (from run)**")
+        st.write(f"- Metric: {wfe.get('metric', 'n/a')}")
+        st.write(f"- Pass rate: {wfe.get('pass_rate_pct', float('nan')):.2f}%")
+        st.write(f"- Pass folds: {wfe.get('pass_fold_count', 'n/a')} / {wfe.get('valid_fold_count', 'n/a')}")
+
+
+def _render_montecarlo_workbook_summary(mc_run_dir: Path) -> None:
+    try:
+        data = load_montecarlo_summary(mc_run_dir)
+    except FileNotFoundError:
+        st.warning("Missing Monte Carlo summary; run Monte Carlo to generate it.")
+        return
+
+    metrics = data.get("metrics", {})
+    thresholds = data.get("thresholds", {})
+    checks = data.get("checks", {})
+
+    passed = bool(checks.get("all_passed")) if isinstance(checks, dict) else False
+    decision = "PASS" if passed else "FAIL"
+    _render_decision_badge("Monte Carlo pass/fail", decision)
+
+    st.markdown("**Monte Carlo thresholds and checks**")
+    if thresholds:
+        st.write(thresholds)
+    if checks:
+        st.write(checks)
+
+    st.markdown("**Key Monte Carlo metrics**")
+    _render_metric_row(
+        [
+            ("Risk of ruin %", _as_float(metrics.get("risk_of_ruin_pct")), "{:.2f}"),
+            ("Median max DD %", _as_float(metrics.get("median_max_drawdown_%")), "{:.2f}"),
+            ("Median return %", _as_float(metrics.get("median_return_%")), "{:.2f}"),
+            ("Return/DD ratio", _as_float(metrics.get("return_drawdown_ratio_median_of_ratios")), "{:.2f}"),
+        ]
+    )
+
+
+def _render_live_pilot_results(mc_run_dir: Path, live_trades_path: Path) -> None:
+    summary_path = mc_run_dir / "mc_summary.json"
+    if not summary_path.exists():
+        st.error("Missing `mc_summary.json` in selected Monte Carlo run.")
+        return
+    if not live_trades_path.exists():
+        st.error(f"Live trades file not found: `{_rel(live_trades_path)}`")
+        return
+
+    mc_summary = _read_json(summary_path)
+    mc_cfg = mc_summary.get("config", {}) if isinstance(mc_summary.get("config"), dict) else {}
+    initial_equity = _as_float(mc_cfg.get("initial_equity", 100000.0))
+    if not np.isfinite(initial_equity) or initial_equity <= 0:
+        initial_equity = 100000.0
+
+    wf_run_dir_raw = str(mc_summary.get("run_dir", "")).strip()
+    if not wf_run_dir_raw:
+        st.error("Monte Carlo summary is missing `run_dir`; cannot locate OOS trades.")
+        return
+    wf_run_dir = _abs_path(wf_run_dir_raw)
+    oos_trades_path = wf_run_dir / "oos_trades.csv"
+    if not oos_trades_path.exists():
+        st.error(f"Missing OOS trades for selected Monte Carlo run: `{_rel(oos_trades_path)}`")
+        return
+
+    live_df = pd.read_csv(live_trades_path)
+    oos_df = pd.read_csv(oos_trades_path)
+
+    live_pnl_col = ""
+    for c in ("pnl", "net_profit", "profit", "net_profit_abs"):
+        if c in live_df.columns:
+            live_pnl_col = c
+            break
+    oos_pnl_col = ""
+    for c in ("pnl", "net_profit", "profit", "net_profit_abs"):
+        if c in oos_df.columns:
+            oos_pnl_col = c
+            break
+
+    if not live_pnl_col:
+        st.error("Live trades file is missing a PnL column. Expected one of: `pnl`, `net_profit`, `profit`, `net_profit_abs`.")
+        return
+    if not oos_pnl_col:
+        st.error("OOS trades file is missing a PnL column. Expected one of: `pnl`, `net_profit`, `profit`, `net_profit_abs`.")
+        return
+
+    live_pnl = pd.to_numeric(live_df[live_pnl_col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    oos_pnl = pd.to_numeric(oos_df[oos_pnl_col], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if live_pnl.empty:
+        st.error("No valid live-trade PnL values found.")
+        return
+    if oos_pnl.empty:
+        st.error("No valid OOS-trade PnL values found in selected walk-forward run.")
+        return
+
+    target_trades = 50
+    n_sims = 10000
+    seed = int(mc_cfg.get("seed", 42))
+    oos_pool = oos_pnl.to_numpy(dtype=float)
+    dist50 = _mc_profit_distribution_from_pool(oos_pool, n_trades=target_trades, n_sims=n_sims, seed=seed)
+
+    band_p5 = float(np.quantile(dist50, 0.05)) if dist50.size else float("nan")
+    band_p95 = float(np.quantile(dist50, 0.95)) if dist50.size else float("nan")
+    band_min = float(np.min(dist50)) if dist50.size else float("nan")
+    band_max = float(np.max(dist50)) if dist50.size else float("nan")
+    live_net_profit_50 = float(live_pnl.iloc[:target_trades].sum()) if len(live_pnl) >= target_trades else float("nan")
+
+    decision = _classify_live_pilot_decision(
+        live_net_profit=live_net_profit_50,
+        band_p5=band_p5,
+        band_p95=band_p95,
+        initial_equity=initial_equity,
+    )
+    _render_decision_badge("Live Pilot Test (Execution Drift)", decision)
+
+    _render_metric_row(
+        [
+            ("Live Trades Available", int(len(live_pnl)), "{:d}"),
+            ("LiveNetProfit @50", live_net_profit_50, "{:.2f}"),
+            ("MC Band P5", band_p5, "{:.2f}"),
+            ("MC Band P95", band_p95, "{:.2f}"),
+        ]
+    )
+    _render_metric_row(
+        [
+            ("MC Band Min", band_min, "{:.2f}"),
+            ("MC Band Max", band_max, "{:.2f}"),
+            ("Initial Equity", initial_equity, "{:.2f}"),
+            ("MC Sims (50-trade)", n_sims, "{:d}"),
+        ]
+    )
+
+    threshold_df = pd.DataFrame(
+        [
+            {
+                "Metric": "LiveNetProfit @50 vs MC 5th-95th",
+                "Actual": "n/a" if not np.isfinite(live_net_profit_50) else f"{live_net_profit_50:,.2f}",
+                "PASS": "inside [P5, P95]",
+                "RETRY": "outside [P5, P95] but not beyond 5% equity drift",
+                "FAIL": "outside band by >5% of initial equity",
+            },
+            {
+                "Metric": "Runs Produced",
+                "Actual": f"{len(live_pnl)} live trades",
+                "PASS": "50 trades",
+                "RETRY": "extend once to 100 trades",
+                "FAIL": "fail early / severe drift",
+            },
+        ]
+    )
+    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+
+    if decision == "RETRY":
+        st.markdown("**Retry Check (100 trades, run once)**")
+        if len(live_pnl) < 100:
+            st.warning("Need at least 100 live trades to run the retry check.")
+        else:
+            dist100 = _mc_profit_distribution_from_pool(oos_pool, n_trades=100, n_sims=n_sims, seed=seed + 1)
+            band100_p5 = float(np.quantile(dist100, 0.05)) if dist100.size else float("nan")
+            band100_p95 = float(np.quantile(dist100, 0.95)) if dist100.size else float("nan")
+            live_net_profit_100 = float(live_pnl.iloc[:100].sum())
+            retry_pass = bool(np.isfinite(live_net_profit_100) and np.isfinite(band100_p5) and np.isfinite(band100_p95) and band100_p5 <= live_net_profit_100 <= band100_p95)
+            _render_status_badge("Retry Result (100-trade band)", retry_pass)
+            _render_metric_row(
+                [
+                    ("LiveNetProfit @100", live_net_profit_100, "{:.2f}"),
+                    ("MC100 P5", band100_p5, "{:.2f}"),
+                    ("MC100 P95", band100_p95, "{:.2f}"),
+                    ("Retry PASS", _status_label(retry_pass), "{}"),
+                ]
+            )
+
+    st.subheader("Monte Carlo Net-Profit Distribution (50 trades)")
+    _render_histogram(pd.Series(dist50), title="MC Net-Profit Distribution (50 trades)", bins=70)
 
 
 def _render_reference_page(strategy_catalog: dict[str, dict[str, Any]], plugin_catalog: dict[str, dict[str, dict[str, Any]]]) -> None:
@@ -1899,6 +3338,7 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
+    _inject_app_css()
     st.title("QuantBT Streamlit Frontend")
     c_meta, c_refresh = st.columns([0.8, 0.2])
     c_meta.caption(f"Script interpreter: `{SCRIPT_PYTHON}`")
@@ -1907,10 +3347,10 @@ def main() -> None:
         st.rerun()
 
     for k in (
+        "last_downloaded_dataset",
         "last_walkforward_run",
         "last_mc_run",
         "last_limited_run",
-        "last_downloaded_dataset",
     ):
         st.session_state.setdefault(k, "")
 
@@ -1920,30 +3360,25 @@ def main() -> None:
     walk_runs = _discover_walkforward_runs()
     mc_runs = _discover_mc_runs()
     limited_runs = _discover_limited_runs()
-    download_symbols = _discover_download_symbols()
-    download_timeframes = _discover_download_timeframes()
 
     fallback_dataset = "data/processed/eurusd_1h_20100101_20260209_dukascopy_python.csv"
-    if st.session_state["last_downloaded_dataset"]:
-        default_dataset = _rel(_abs_path(st.session_state["last_downloaded_dataset"]))
-    elif data_files:
+    if data_files:
         default_dataset = _rel(data_files[0])
     else:
         default_dataset = fallback_dataset
 
     page_options = {
-        "run_tests": "Run Tests",
-        "download_data": "Download Data",
+        "download_data": "Download data",
+        "run_test": "Run test",
         "results": "Results",
-        "reference": "Reference",
     }
-    requested_page = _qp_get("page", "run_tests")
+    requested_page = _qp_get("page", "run_test")
     if requested_page == "html_view":
         _render_html_view_page()
         return
     keys = list(page_options.keys())
     if requested_page not in keys:
-        requested_page = "run_tests"
+        requested_page = "run_test"
 
     nav_key = "nav_page"
     last_qp_key = "_last_nav_qp_page"
@@ -1983,9 +3418,204 @@ def main() -> None:
             pass
     st.session_state[last_qp_key] = page
 
-    if page == "run_tests":
-        st.header("Run Tests")
-        t_wf, t_mc, t_limited = st.tabs(["Walk-forward", "Monte Carlo", "Limited tests"])
+    if page == "download_data":
+        st.header("Download data")
+        st.markdown(
+            "Download historical data to run tests against."
+        )
+
+        provider = st.selectbox(
+            "Provider",
+            options=("dukascopy", "mt5_ftmo"),
+            format_func=lambda p: "Dukascopy FX" if p == "dukascopy" else "MT5 / FTMO",
+            key="download_provider",
+        )
+
+        symbol = "EURUSD"
+        timeframe = "1H"
+        mt5_backend = "silicon"
+        mt5_host = "localhost"
+        mt5_port = 8001
+        mt5_login_raw = ""
+        mt5_password = ""
+        mt5_server = ""
+        mt5_terminal_path = ""
+        mt5_batch_size = 1000
+        mt5_max_backfill_batches = 15000
+        mt5_progress_every = 25
+        mt5_allow_incomplete = False
+
+        min_download_date = date(1990, 1, 1)
+        max_download_date = date.today()
+        c_date_1, c_date_2 = st.columns(2)
+        start_date = c_date_1.date_input(
+            "Start date",
+            value=date(2010, 1, 1),
+            min_value=min_download_date,
+            max_value=max_download_date,
+            key="download_start_date",
+        )
+        end_date = c_date_2.date_input(
+            "End date",
+            value=max_download_date,
+            min_value=min_download_date,
+            max_value=max_download_date,
+            key="download_end_date",
+        )
+
+        if provider == "dukascopy":
+            download_symbols = _discover_download_symbols()
+            download_timeframes = _discover_download_timeframes()
+            default_idx = download_symbols.index("EURUSD") if "EURUSD" in download_symbols else 0
+            default_tf_idx = download_timeframes.index("1H") if "1H" in download_timeframes else 0
+            c1, c2 = st.columns(2)
+            symbol = c1.selectbox("Symbol", download_symbols, index=default_idx, key="download_symbol_dk")
+            timeframe = c2.selectbox("Timeframe", download_timeframes, index=default_tf_idx, key="download_tf_dk")
+            st.caption(
+                f"Available Dukascopy FX symbols: {len(download_symbols)} | "
+                f"timeframes: {len(download_timeframes)}"
+            )
+        else:
+            c1, c2, c3 = st.columns(3)
+            mt5_backend = c1.selectbox(
+                "MT5 backend",
+                options=("silicon", "auto", "native"),
+                index=0,
+                key="download_mt5_backend",
+            )
+            mt5_host = c2.text_input("MT5 host", value="localhost", key="download_mt5_host").strip() or "localhost"
+            mt5_port = int(c3.number_input("MT5 port", min_value=1, max_value=65535, value=8001, step=1, key="download_mt5_port"))
+
+            mt5_timeframes = _discover_mt5_download_timeframes(mt5_backend, mt5_host, mt5_port)
+            default_mt5_tf_idx = mt5_timeframes.index("M5") if "M5" in mt5_timeframes else 0
+            c4, c5 = st.columns(2)
+            symbol = c4.text_input("Symbol", value="EURUSD", key="download_symbol_mt5").strip().upper() or "EURUSD"
+            timeframe = c5.selectbox("Timeframe", mt5_timeframes, index=default_mt5_tf_idx, key="download_tf_mt5")
+
+            c6, c7, c8 = st.columns(3)
+            mt5_login_raw = c6.text_input("MT5 login (optional)", value="", key="download_mt5_login")
+            mt5_password = c7.text_input("MT5 password (optional)", value="", type="password", key="download_mt5_password")
+            mt5_server = c8.text_input("MT5 server (optional)", value="", key="download_mt5_server")
+            mt5_terminal_path = st.text_input("MT5 terminal path (native backend only)", value="", key="download_mt5_terminal_path")
+
+            c9, c10, c11, c12 = st.columns(4)
+            mt5_batch_size = int(c9.number_input("Batch size", min_value=10, max_value=20000, value=1000, step=10, key="download_mt5_batch_size"))
+            mt5_max_backfill_batches = int(
+                c10.number_input(
+                    "Max backfill batches",
+                    min_value=10,
+                    max_value=200000,
+                    value=15000,
+                    step=100,
+                    key="download_mt5_max_backfill_batches",
+                )
+            )
+            mt5_progress_every = int(
+                c11.number_input(
+                    "Progress every N batches",
+                    min_value=0,
+                    max_value=10000,
+                    value=25,
+                    step=1,
+                    key="download_mt5_progress_every",
+                )
+            )
+            mt5_allow_incomplete = c12.checkbox("Allow incomplete", value=False, key="download_mt5_allow_incomplete")
+            st.caption(f"Detected MT5 timeframes: {len(mt5_timeframes)} (from connected backend if available)")
+
+        c_common_1, c_common_2, c_common_3 = st.columns(3)
+        file_ext = c_common_1.selectbox("File extension", ("csv", "parquet"), key="download_file_ext")
+        save_dir = c_common_2.text_input("Save directory", value="data/processed", key="download_save_dir")
+        extra_args = c_common_3.text_input("Extra args (optional)", value="", key="download_extra_args")
+
+        if st.button("Download data", type="primary"):
+            try:
+                if start_date >= end_date:
+                    raise ValueError("Start date must be earlier than end date")
+
+                cmd = [
+                    SCRIPT_PYTHON,
+                    str(SCRIPTS_DIR / "download_data.py"),
+                    "--provider",
+                    provider,
+                    "--symbol",
+                    symbol.strip().upper(),
+                    "--timeframe",
+                    timeframe,
+                    "--start",
+                    start_date.isoformat(),
+                    "--end",
+                    end_date.isoformat(),
+                    "--save-dir",
+                    save_dir.strip(),
+                    "--file-ext",
+                    file_ext,
+                ]
+                if provider == "mt5_ftmo":
+                    cmd.extend(
+                        [
+                            "--mt5-backend",
+                            mt5_backend,
+                            "--mt5-host",
+                            mt5_host,
+                            "--mt5-port",
+                            str(int(mt5_port)),
+                            "--mt5-batch-size",
+                            str(int(mt5_batch_size)),
+                            "--mt5-max-backfill-batches",
+                            str(int(mt5_max_backfill_batches)),
+                            "--mt5-progress-every",
+                            str(int(mt5_progress_every)),
+                        ]
+                    )
+                    if mt5_login_raw.strip():
+                        try:
+                            int(mt5_login_raw.strip())
+                        except ValueError as e:
+                            raise ValueError("MT5 login must be an integer when provided.") from e
+                        cmd.extend(["--mt5-login", mt5_login_raw.strip()])
+                    if mt5_password.strip():
+                        cmd.extend(["--mt5-password", mt5_password.strip()])
+                    if mt5_server.strip():
+                        cmd.extend(["--mt5-server", mt5_server.strip()])
+                    if mt5_terminal_path.strip():
+                        cmd.extend(["--mt5-terminal-path", mt5_terminal_path.strip()])
+                    if mt5_allow_incomplete:
+                        cmd.append("--mt5-allow-incomplete")
+                cmd.extend(_parse_extra_args(extra_args))
+            except ValueError as e:
+                st.error(f"Invalid arguments: {e}")
+            else:
+                rc, out = _run_cli_live(cmd, workflow="download")
+                if rc == 0:
+                    dataset_path = _extract_path_after_marker(out, "rows to:")
+                    if dataset_path is None:
+                        dataset_path = _extract_path_after_marker(out, "Saved dataset:")
+                    meta_path = _extract_path_after_marker(out, "Metadata:")
+                    if dataset_path is not None:
+                        st.session_state["last_downloaded_dataset"] = dataset_path.as_posix()
+                        st.success(f"Dataset saved: {_rel(dataset_path)}")
+                    if meta_path is not None:
+                        st.info(f"Metadata saved: {_rel(meta_path)}")
+
+    elif page == "run_test":
+        st.header("Run tests")
+        st.markdown(
+            "Use this page to run limited tests, walk-forward analysis, and Monte Carlo."
+        )
+
+        st.subheader("1) Dataset")
+        dataset_options = [_rel(p) for p in data_files]
+        default_wb_dataset = st.session_state.get("wb_dataset", default_dataset)
+        wb_dataset = st.selectbox(
+            "Dataset CSV",
+            dataset_options,
+            index=dataset_options.index(default_wb_dataset) if default_wb_dataset in dataset_options else 0,
+            key="wb_dataset",
+        )
+        st.markdown(f"**Selected dataset:** `{wb_dataset}`")
+
+        t_limited, t_wf, t_mc = st.tabs(["Limited tests", "Walk-forward", "Monte Carlo"])
 
         with t_wf:
             strategy_names = sorted(strategy_catalog.keys())
@@ -1995,7 +3625,7 @@ def main() -> None:
             st.markdown(_reference_link("View strategy config", "strategy", strategy))
 
             dataset_options = [_rel(p) for p in data_files]
-            dataset = _select_path_from_options("Dataset CSV", dataset_options, default_dataset, key_prefix="wf_dataset")
+            dataset = _select_path_from_options("Dataset CSV", dataset_options, wb_dataset, key_prefix="wf_dataset")
 
             c1, c2, c3, c4 = st.columns(4)
             optimizer = c1.selectbox("Optimizer", ("grid", "optuna"))
@@ -2190,6 +3820,12 @@ def main() -> None:
                             else:
                                 st.warning(f"Walk-forward HTML auto-generation failed: {msg}")
 
+            last_wf = st.session_state.get("last_walkforward_run", "")
+            if last_wf:
+                st.markdown("---")
+                st.subheader("Last walk-forward output")
+                _render_walkforward_workbook_summary(_abs_path(last_wf))
+
         with t_mc:
             walk_run_options = [p.as_posix() for p in walk_runs]
             default_walk_run = st.session_state["last_walkforward_run"] or (walk_run_options[0] if walk_run_options else "runs/walkforward/...")
@@ -2284,23 +3920,23 @@ def main() -> None:
                             else:
                                 st.warning(f"Monte Carlo HTML auto-generation failed: {msg}")
 
+            last_mc = st.session_state.get("last_mc_run", "")
+            if last_mc:
+                st.markdown("---")
+                st.subheader("Last Monte Carlo output")
+                _render_montecarlo_workbook_summary(_abs_path(last_mc))
+
         with t_limited:
             strategy_names = sorted(strategy_catalog.keys())
             default_strategy_idx = strategy_names.index("sma_cross_test_strat") if "sma_cross_test_strat" in strategy_names else 0
-            strategy_short = st.selectbox("Strategy", strategy_names, index=default_strategy_idx, key="limited_strategy")
+            st.subheader("2) Strategy + Scenario")
+            setup_left, setup_right = st.columns([0.92, 1.08], gap="large")
+            with setup_left:
+                strategy_short = st.selectbox("Strategy", strategy_names, index=default_strategy_idx, key="limited_strategy")
             strategy_module = f"quantbt.strategies.{strategy_short}"
             strategy_info = strategy_catalog.get(strategy_short, {})
             strategy_cfg = strategy_info.get("strategy_config", {})
-
-            st.markdown(_reference_link("View strategy config", "strategy", strategy_short))
-
-            dataset_options = [_rel(p) for p in data_files]
-            data_path = _select_path_from_options(
-                "Dataset CSV",
-                dataset_options,
-                default_dataset,
-                key_prefix="limited_dataset",
-            )
+            data_path = wb_dataset
 
             entry_plugins = sorted(plugin_catalog.get("entry", {}).keys())
             exit_plugins = sorted(plugin_catalog.get("exit", {}).keys())
@@ -2341,6 +3977,7 @@ def main() -> None:
                 ],
             }
             similar_entry_criteria = {"total_return_%": {">": 0}}
+            strategy_param_space = copy.deepcopy(strategy_info.get("param_space", {}) or {})
             liqsweep_entry_grid = {
                 "atr_dist_for_liq_generation": [0.8, 1.0, 1.2],
                 "htf": ["30", "60"],
@@ -2354,6 +3991,43 @@ def main() -> None:
                 if fixed_template_entry_plugin == "interequity_liqsweep_entry":
                     return copy.deepcopy(liqsweep_entry_grid)
                 return _strategy_default_entry_params()
+
+            def _similar_entry_template_params() -> dict[str, Any]:
+                params = _strategy_default_entry_params()
+                entry_name = str(entry_default_name or "")
+                if entry_name in {"interequity_liqsweep_entry", "interequity_liqsweepb_entry"}:
+                    params["atr_dist_for_liq_generation"] = _build_numeric_range_values(0.4, 2.2, 0.2, integer=False)
+                    params["liq_move_away_atr"] = _build_numeric_range_values(1.0, 5.5, 0.5, integer=False)
+                    return params
+
+                preferred_order = [
+                    "atr_dist_for_liq_generation",
+                    "liq_move_away_atr",
+                    "lookback",
+                    "fast",
+                    "slow",
+                    "length",
+                    "period",
+                    "window",
+                    "max_rr",
+                ]
+                candidates = [
+                    key
+                    for key, value in strategy_param_space.items()
+                    if isinstance(value, list) and value and all(isinstance(v, (int, float)) for v in value)
+                ]
+                if not candidates:
+                    return params
+                ranked = sorted(
+                    candidates,
+                    key=lambda key: (
+                        preferred_order.index(key) if key in preferred_order else len(preferred_order),
+                        str(key),
+                    ),
+                )
+                for key in ranked[:2]:
+                    params[key] = copy.deepcopy(strategy_param_space[key])
+                return params
 
             preset_defs: dict[str, dict[str, Any]] = {
                 "Core": {
@@ -2395,10 +4069,10 @@ def main() -> None:
                     "pass_threshold": "",
                 },
                 "Similar Entry": {
-                    "entry_plugin": "donchian_breakout",
-                    "entry_params": {"lookback": [20]},
-                    "exit_plugin": "atr_brackets",
-                    "exit_params": {"rr": [1.0, 1.5, 2.0, 2.5, 3.0], "sldist_atr_mult": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0], "atr_period": 14},
+                    "entry_plugin": default_entry,
+                    "entry_params": _similar_entry_template_params(),
+                    "exit_plugin": default_exit,
+                    "exit_params": _strategy_default_exit_params(),
                     "seed_count": "",
                     "seed_start": "",
                     "exit_seed_count": "",
@@ -2417,6 +4091,7 @@ def main() -> None:
                     "exit_seed_start": "",
                     "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
                     "pass_threshold": "90",
+                    "extra_args": "--monkey-davey-style",
                 },
                 "Monkey Exit": {
                     "entry_plugin": default_entry,
@@ -2429,6 +4104,7 @@ def main() -> None:
                     "exit_seed_start": "1",
                     "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
                     "pass_threshold": "90",
+                    "extra_args": "--monkey-davey-style --monkey-fast-summary",
                 },
                 "Monkey Entry + Exit": {
                     "entry_plugin": "monkey_entry",
@@ -2441,10 +4117,50 @@ def main() -> None:
                     "exit_seed_start": "",
                     "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
                     "pass_threshold": "90",
+                    "extra_args": "--monkey-davey-style --monkey-fast-summary",
                 },
             }
 
-            preset_label = st.selectbox("Limited test template", list(preset_defs.keys()), key="limited_test_template")
+            workbook_scenario_map: dict[str, dict[str, Any]] = {
+                str(x.get("name", "")).strip(): x
+                for x in LIMITED_WORKBOOK_SCENARIOS
+                if isinstance(x, dict) and str(x.get("name", "")).strip()
+            }
+            default_workbook_template = (
+                "CORE TEST"
+                if "CORE TEST" in workbook_scenario_map
+                else (next(iter(workbook_scenario_map.keys())) if workbook_scenario_map else "Custom")
+            )
+            st.session_state.setdefault("limited_workbook_template", default_workbook_template)
+            with setup_right:
+                selected_workbook_template = st.selectbox(
+                    "Workbook scenario template",
+                    [*list(workbook_scenario_map.keys()), "Custom"],
+                    key="limited_workbook_template",
+                )
+
+            selected_workbook: dict[str, Any] | None = workbook_scenario_map.get(selected_workbook_template)
+            if isinstance(selected_workbook, dict):
+                preset_label = str(selected_workbook.get("preset", "Core")).strip() or "Core"
+                st.session_state["limited_test_template"] = preset_label
+                st.session_state["limited_test_type"] = str(selected_workbook.get("test_type", "Custom") or "Custom")
+                if preset_label.startswith("Monkey"):
+                    st.info(
+                        "Monkey tests default to strict Davey mode in this UI. "
+                        "Use the baseline-matched setup section below before running."
+                    )
+            else:
+                st.session_state["limited_test_type"] = "Custom"
+                preset_label = "Custom"
+
+            with setup_left:
+                st.markdown(_reference_link("View strategy config", "strategy", strategy_short))
+                st.caption(f"Dataset comes from the page-level selector: `{wb_dataset}`")
+            with setup_right:
+                if isinstance(selected_workbook, dict):
+                    st.caption(f"Preset route: `{preset_label}`. Scenario selection auto-loads the defaults shown below.")
+                else:
+                    st.caption("Custom mode leaves the fields below fully editable.")
 
             def _safe_plugin_choice(value: str, options: list[str], fallback: str) -> str:
                 return value if value in options else fallback
@@ -2480,20 +4196,20 @@ def main() -> None:
                 st.session_state["limited_exit_seed_start"] = str(tpl.get("exit_seed_start", ""))
                 st.session_state["limited_favourable_criteria"] = str(tpl.get("favourable_criteria", ""))
                 st.session_state["limited_pass_threshold"] = str(tpl.get("pass_threshold", ""))
+                st.session_state["limited_extra_args"] = str(tpl.get("extra_args", ""))
                 st.session_state.setdefault("limited_commission_rt", "5")
+                st.session_state.setdefault("limited_spread_pips", "0.2")
+                st.session_state.setdefault("limited_pip_size", "0.0001")
 
-            preset_track_key = "_limited_last_applied_template"
-            strategy_track_key = "_limited_last_template_strategy"
-            template_changed = st.session_state.get(preset_track_key) != preset_label
-            strategy_changed = st.session_state.get(strategy_track_key) != strategy_short
+            def _apply_workbook_review_defaults(workbook_def: dict[str, Any]) -> None:
+                st.session_state["limited_workbook_output_rows"] = _build_workbook_output_rows(list(workbook_def.get("outputs", [])))
+                st.session_state["limited_workbook_rule_rows"] = _build_workbook_rule_rows(list(workbook_def.get("pass_criteria", [])))
+                st.session_state.pop("limited_workbook_output_rows_editor", None)
+                st.session_state.pop("limited_workbook_rule_rows_editor", None)
+
+            workbook_track_key = "_limited_last_workbook_signature"
             prefill_lock = bool(st.session_state.pop("_limited_prefill_lock", False))
-            if prefill_lock:
-                st.session_state[preset_track_key] = preset_label
-                st.session_state[strategy_track_key] = strategy_short
-            elif template_changed or strategy_changed:
-                _apply_limited_template(preset_label)
-                st.session_state[preset_track_key] = preset_label
-                st.session_state[strategy_track_key] = strategy_short
+            selected_workbook_signature = f"{strategy_short}::{selected_workbook_template}::{preset_label}"
 
             st.session_state.setdefault("limited_entry_plugin_select", default_entry)
             st.session_state.setdefault("limited_exit_plugin_select", default_exit)
@@ -2505,6 +4221,8 @@ def main() -> None:
             st.session_state.setdefault("limited_test_name", "")
             st.session_state.setdefault("limited_progress_every", 10)
             st.session_state.setdefault("limited_commission_rt", "5")
+            st.session_state.setdefault("limited_spread_pips", "0.2")
+            st.session_state.setdefault("limited_pip_size", "0.0001")
             st.session_state.setdefault("limited_pass_threshold", "")
             st.session_state.setdefault("limited_min_trades", "")
             st.session_state.setdefault("limited_favourable_criteria", "")
@@ -2513,52 +4231,830 @@ def main() -> None:
             st.session_state.setdefault("limited_seed_start", "")
             st.session_state.setdefault("limited_exit_seed_count", "")
             st.session_state.setdefault("limited_exit_seed_start", "")
+            st.session_state.setdefault("limited_workbook_output_rows", [])
+            st.session_state.setdefault("limited_workbook_rule_rows", [])
+            st.session_state.setdefault("limited_monkey_unlock_overrides", False)
+            st.session_state.setdefault("limited_monkey_derived_fields", {})
+            st.session_state.setdefault("_limited_pending_form_updates", {})
 
-            c1, c2, c3 = st.columns(3)
-            entry_plugin = c1.selectbox("Entry plugin", [default_entry, *entry_plugins], key="limited_entry_plugin_select")
-            exit_plugin = c2.selectbox("Exit plugin", [default_exit, *exit_plugins], key="limited_exit_plugin_select")
-            sizing_plugin = c3.selectbox("Sizing plugin", [default_sizing, *sizing_plugins], key="limited_sizing_plugin_select")
+            pending_limited_updates = st.session_state.pop("_limited_pending_form_updates", None)
+            if isinstance(pending_limited_updates, dict) and pending_limited_updates:
+                for _k, _v in pending_limited_updates.items():
+                    st.session_state[_k] = _v
 
-            selected_entry_name = entry_default_name if entry_plugin == default_entry else entry_plugin
-            selected_exit_name = exit_default_name if exit_plugin == default_exit else exit_plugin
-            selected_sizing_name = sizing_default_name if sizing_plugin == default_sizing else sizing_plugin
+            if isinstance(selected_workbook, dict) and not prefill_lock:
+                if st.session_state.get(workbook_track_key) != selected_workbook_signature:
+                    _apply_limited_template(preset_label)
+                    _apply_workbook_review_defaults(selected_workbook)
+                    st.session_state["limited_monkey_unlock_overrides"] = False
+            st.session_state[workbook_track_key] = selected_workbook_signature
+
+            st.markdown(
+                '<div class="qt-subtle-card"><div class="qt-kicker">Scenario Brief</div>'
+                '<div class="qt-card-title">Workbook-aligned test definition</div>'
+                '<div class="qt-card-note">The selected scenario decides which limited-test fields are shown and which defaults are loaded.</div></div>',
+                unsafe_allow_html=True,
+            )
+            _render_chip_group("Global Inputs", LIMITED_WORKBOOK_GLOBAL_INPUTS, tone="input")
+
+            if isinstance(selected_workbook, dict):
+                w1, w2, w3 = st.columns(3)
+                with w1:
+                    _render_chip_group("Inputs", list(selected_workbook.get("inputs", [])), tone="input")
+                with w2:
+                    _render_chip_group("Outputs", list(selected_workbook.get("outputs", [])), tone="output")
+                with w3:
+                    _render_chip_group("Pass Criteria", list(selected_workbook.get("pass_criteria", [])), tone="pass")
+
+                selected_workbook_preset = str(selected_workbook.get("preset", "")).strip()
+                if selected_workbook_preset.startswith("Monkey"):
+                    st.caption(
+                        "Monkey scenarios should use the baseline-matched section below to bind targets "
+                        "(trade count/long ratio/avg hold) to a selected core baseline run."
+                    )
+            else:
+                st.info("`Custom` selected. Fields below remain fully manual.")
+
+            monkey_modes = {"Monkey Entry", "Monkey Exit", "Monkey Entry + Exit"}
+            selected_monkey_mode = preset_label if preset_label in monkey_modes else None
+
+            def _reapply_locked_monkey_fields(mode_label: str | None) -> None:
+                if not mode_label:
+                    return
+                if bool(st.session_state.get("limited_monkey_unlock_overrides", False)):
+                    return
+                payload = st.session_state.get("limited_monkey_derived_fields")
+                if not isinstance(payload, dict):
+                    return
+                if str(payload.get("mode", "")) != str(mode_label):
+                    return
+                protected_keys = [
+                    "limited_entry_plugin_select",
+                    "limited_exit_plugin_select",
+                    "limited_entry_params_json",
+                    "limited_exit_params_json",
+                    "limited_seed_count",
+                    "limited_seed_start",
+                    "limited_exit_seed_count",
+                    "limited_exit_seed_start",
+                    "limited_favourable_criteria",
+                    "limited_pass_threshold",
+                    "limited_min_trades",
+                    "limited_test_name",
+                    "limited_extra_args",
+                ]
+                for k in protected_keys:
+                    if k in payload:
+                        st.session_state[k] = payload[k]
+
+            _reapply_locked_monkey_fields(selected_monkey_mode)
+
+            monkey_base_run_raw = ""
+            monkey_baseline_loaded_ok: bool | None = None
+
+            scenario_entry_label = (
+                str(selected_workbook.get("entry_params_label", "Entry params JSON"))
+                if isinstance(selected_workbook, dict)
+                else "Entry params JSON"
+            )
+            scenario_exit_label = (
+                str(selected_workbook.get("exit_params_label", "Exit params JSON"))
+                if isinstance(selected_workbook, dict)
+                else "Exit params JSON"
+            )
+            current_entry_plugin = str(st.session_state.get("limited_entry_plugin_select", default_entry) or default_entry)
+            current_exit_plugin = str(st.session_state.get("limited_exit_plugin_select", default_exit) or default_exit)
+            current_sizing_plugin = str(st.session_state.get("limited_sizing_plugin_select", default_sizing) or default_sizing)
+            current_entry_name = entry_default_name if current_entry_plugin == default_entry else current_entry_plugin
+            current_exit_name = exit_default_name if current_exit_plugin == default_exit else current_exit_plugin
+            current_sizing_name = sizing_default_name if current_sizing_plugin == default_sizing else current_sizing_plugin
+
+            st.subheader("3) Scenario Inputs")
+            st.caption("Scenario defaults are loaded automatically. Only the controls needed for this limited test stay visible here.")
+            input_assumption_cols = st.columns(2)
+            spread_pips = input_assumption_cols[0].text_input("Slippage / spread (pips)", key="limited_spread_pips")
+            commission_rt = input_assumption_cols[1].text_input("Commission RT", key="limited_commission_rt")
+
+            st.caption(
+                f"Active setup: entry=`{current_entry_name or 'none'}` | "
+                f"exit=`{current_exit_name or 'none'}` | "
+                f"sizing=`{current_sizing_name or 'none'}` | "
+                f"preset=`{preset_label}`"
+            )
 
             link_cols = st.columns(3)
-            if selected_entry_name:
-                link_cols[0].markdown(_reference_link("View entry plugin", "entry", str(selected_entry_name)))
-            if selected_exit_name:
-                link_cols[1].markdown(_reference_link("View exit plugin", "exit", str(selected_exit_name)))
-            if selected_sizing_name:
-                link_cols[2].markdown(_reference_link("View sizing plugin", "sizing", str(selected_sizing_name)))
+            if current_entry_name:
+                link_cols[0].markdown(_reference_link("View entry plugin", "entry", str(current_entry_name)))
+            if current_exit_name:
+                link_cols[1].markdown(_reference_link("View exit plugin", "exit", str(current_exit_name)))
+            if current_sizing_name:
+                link_cols[2].markdown(_reference_link("View sizing plugin", "sizing", str(current_sizing_name)))
 
-            c4, c5 = st.columns(2)
-            entry_params = c4.text_area("Entry params JSON", height=140, key="limited_entry_params_json")
-            exit_params = c5.text_area("Exit params JSON", height=140, key="limited_exit_params_json")
+            entry_params_dict = _json_object_or_empty(st.session_state.get("limited_entry_params_json", ""))
+            exit_params_dict = _json_object_or_empty(st.session_state.get("limited_exit_params_json", ""))
+            structured_input_checks: list[tuple[bool, str, str]] = []
+            show_entry_json_in_main = True
+            show_exit_json_in_main = True
+            monkey_entry_plugin_names = {"monkey_entry", "random"}
+            monkey_exit_plugin_names = {"monkey_exit", "random_time_exit"}
+            rr_exit_plugin_names = {"atr_brackets", "interequity_liqsweep_exit", "interequity_liqsweepb_exit"}
+            similar_entry_structured_keys: list[str] = []
+            if preset_label == "Similar Entry":
+                entry_priority = [
+                    "atr_dist_for_liq_generation",
+                    "liq_move_away_atr",
+                    "lookback",
+                    "fast",
+                    "slow",
+                    "length",
+                    "period",
+                    "window",
+                    "max_rr",
+                ]
+                similar_entry_structured_keys = [
+                    key
+                    for key, value in entry_params_dict.items()
+                    if _derive_numeric_range_spec(value) is not None
+                ]
+                similar_entry_structured_keys = sorted(
+                    similar_entry_structured_keys,
+                    key=lambda key: (
+                        entry_priority.index(key) if key in entry_priority else len(entry_priority),
+                        str(key),
+                    ),
+                )[:2]
 
-            sizing_params = st.text_area("Sizing params JSON", height=110, key="limited_sizing_params_json")
+            scenario_param_cols = st.columns(2)
+            with scenario_param_cols[0]:
+                st.markdown(f"**{scenario_entry_label}**")
+                if str(current_entry_name or "") in monkey_entry_plugin_names:
+                    show_entry_json_in_main = False
+                    entry_target_default = int(entry_params_dict.get("target_entries", 0) or 0)
+                    entry_long_ratio_default = float(entry_params_dict.get("long_ratio", entry_params_dict.get("long_pct", 0.5)) or 0.5)
+                    _sync_widget_from_source("limited_structured_target_entries", entry_target_default)
+                    _sync_widget_from_source(
+                        "limited_structured_long_ratio_pct",
+                        int(round(max(0.0, min(1.0, entry_long_ratio_default)) * 100.0)),
+                    )
+                    target_entries = int(
+                        st.number_input(
+                            "Target entries",
+                            min_value=0,
+                            step=1,
+                            key="limited_structured_target_entries",
+                        )
+                    )
+                    long_ratio_pct = int(
+                        st.slider(
+                            "Long ratio (%)",
+                            min_value=0,
+                            max_value=100,
+                            step=1,
+                            key="limited_structured_long_ratio_pct",
+                        )
+                    )
+                    entry_side = str(entry_params_dict.get("side", "both") or "both")
+                    entry_params_dict["target_entries"] = int(target_entries)
+                    entry_params_dict["long_ratio"] = round(float(long_ratio_pct) / 100.0, 4)
+                    entry_params_dict.pop("prob", None)
+                    st.session_state["limited_entry_params_json"] = _json_pretty(entry_params_dict)
+                    entry_params = st.session_state["limited_entry_params_json"]
+                    st.caption(
+                        f"Side mode: `{entry_side}`. Use Advanced to change side, spacing, seed, or other monkey-entry parameters."
+                    )
+                elif similar_entry_structured_keys:
+                    show_entry_json_in_main = False
+                    for key in similar_entry_structured_keys:
+                        spec = _derive_numeric_range_spec(entry_params_dict.get(key))
+                        if spec is None:
+                            continue
+                        start_default, stop_default, step_default, integer_mode = spec
+                        widget_prefix = f"limited_structured_{key}"
+                        start_seed = int(round(start_default)) if integer_mode else float(start_default)
+                        stop_seed = int(round(stop_default)) if integer_mode else float(stop_default)
+                        step_seed = max(1, int(round(step_default))) if integer_mode else float(step_default)
+                        _sync_widget_from_source(f"{widget_prefix}_start", start_seed)
+                        _sync_widget_from_source(f"{widget_prefix}_stop", stop_seed)
+                        _sync_widget_from_source(f"{widget_prefix}_step", step_seed)
+                        nice_label = key.replace("_", " ")
+                        st.markdown(f"`{key}`")
+                        range_cols = st.columns(3)
+                        if integer_mode:
+                            start_val = int(range_cols[0].number_input("Start", step=1, key=f"{widget_prefix}_start"))
+                            stop_val = int(range_cols[1].number_input("Stop", step=1, key=f"{widget_prefix}_stop"))
+                            step_val = int(range_cols[2].number_input("Step", min_value=1, step=1, key=f"{widget_prefix}_step"))
+                        else:
+                            number_step = float(step_seed) if math.isfinite(float(step_seed)) and float(step_seed) > 0 else 0.1
+                            start_val = float(range_cols[0].number_input("Start", step=number_step, format="%.4f", key=f"{widget_prefix}_start"))
+                            stop_val = float(range_cols[1].number_input("Stop", step=number_step, format="%.4f", key=f"{widget_prefix}_stop"))
+                            step_val = float(
+                                range_cols[2].number_input(
+                                    "Step",
+                                    min_value=float(number_step / 10.0),
+                                    step=number_step,
+                                    format="%.4f",
+                                    key=f"{widget_prefix}_step",
+                                )
+                            )
+                        try:
+                            range_values = _build_numeric_range_values(start_val, stop_val, step_val, integer=integer_mode)
+                            entry_params_dict[key] = range_values
+                            structured_input_checks.append((True, f"{nice_label} range", f"{len(range_values)} values"))
+                        except Exception as e:
+                            structured_input_checks.append((False, f"{nice_label} range", str(e)))
+                    st.session_state["limited_entry_params_json"] = _json_pretty(entry_params_dict)
+                    entry_params = st.session_state["limited_entry_params_json"]
+                    st.caption("These are the optimisable entry ranges for the similar-entry test. Fixed baseline entry fields are preserved.")
+                else:
+                    entry_params = st.text_area(
+                        scenario_entry_label,
+                        height=150,
+                        key="limited_entry_params_json",
+                    )
 
-            c6, c7, c8 = st.columns(3)
-            run_base = c6.text_input("Run base (optional)", key="limited_run_base")
-            test_name = c7.text_input("Test name (optional)", key="limited_test_name")
-            progress_every = int(c8.number_input("Progress every", min_value=1, step=1, key="limited_progress_every"))
+            with scenario_param_cols[1]:
+                st.markdown(f"**{scenario_exit_label}**")
+                if str(current_exit_name or "") in rr_exit_plugin_names and (
+                    str(current_exit_name or "") == "atr_brackets" or "rr" in exit_params_dict
+                ):
+                    show_exit_json_in_main = False
+                    rr_key = "rr" if ("rr" in exit_params_dict or str(current_exit_name or "") == "atr_brackets") else "min_rr"
+                    rr_default = _value_to_csv_text(
+                        exit_params_dict.get(rr_key, exit_params_dict.get("rr", exit_params_dict.get("min_rr", 1.5)))
+                    )
+                    _sync_widget_from_source("limited_structured_rr_values", rr_default)
+                    rr_text = st.text_input(
+                        "RR value(s)",
+                        key="limited_structured_rr_values",
+                        help="Enter a single RR or comma-separated RR values to sweep multiple settings.",
+                    )
+                    rr_ok, rr_value, rr_detail = _parse_csv_numeric_text(rr_text, kind="float")
+                    structured_input_checks.append((rr_ok, "RR value(s)", rr_detail))
+                    if rr_ok and rr_value is not None:
+                        exit_params_dict[rr_key] = rr_value
+                        st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
+                    exit_params = st.session_state.get("limited_exit_params_json", _json_pretty(exit_params_dict))
+                    st.caption("Other exit parameters are preserved. Use Advanced if you need to edit stop-distance or plugin-specific fields.")
+                elif str(current_exit_name or "") == "time_exit":
+                    show_exit_json_in_main = False
+                    hold_bars_default = _value_to_csv_text(exit_params_dict.get("hold_bars", 1))
+                    _sync_widget_from_source("limited_structured_hold_bars", hold_bars_default)
+                    hold_bars_text = st.text_input(
+                        "Hold bars",
+                        key="limited_structured_hold_bars",
+                        help="Enter a single hold-bar value or comma-separated integers to sweep multiple settings.",
+                    )
+                    hold_ok, hold_value, hold_detail = _parse_csv_numeric_text(hold_bars_text, kind="int")
+                    structured_input_checks.append((hold_ok, "Hold bars", hold_detail))
+                    if hold_ok and hold_value is not None:
+                        exit_params_dict["hold_bars"] = hold_value
+                        st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
+                    exit_params = st.session_state.get("limited_exit_params_json", _json_pretty(exit_params_dict))
+                    st.caption("Use comma-separated integers to test several fixed holding periods without editing JSON.")
+                elif str(current_exit_name or "") in monkey_exit_plugin_names:
+                    show_exit_json_in_main = False
+                    avg_hold_default = float(
+                        exit_params_dict.get("avg_hold_bars", exit_params_dict.get("hold_bars", 10.0)) or 10.0
+                    )
+                    if not math.isfinite(avg_hold_default) or avg_hold_default <= 0:
+                        avg_hold_default = 10.0
+                    _sync_widget_from_source("limited_structured_avg_hold_bars", float(avg_hold_default))
+                    avg_hold_bars = float(
+                        st.number_input(
+                            "Average hold bars",
+                            min_value=1.0,
+                            step=0.25,
+                            key="limited_structured_avg_hold_bars",
+                        )
+                    )
+                    exit_params_dict["avg_hold_bars"] = float(avg_hold_bars)
+                    exit_params_dict.pop("hold_bars_values", None)
+                    exit_params_dict.pop("hold_bars", None)
+                    st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
+                    exit_params = st.session_state["limited_exit_params_json"]
+                    st.caption("This controls the mean hold time for monkey exit sampling. Seed settings remain in the Monkey Sampling section.")
+                else:
+                    exit_params = st.text_area(
+                        scenario_exit_label,
+                        height=150,
+                        key="limited_exit_params_json",
+                    )
 
-            c9, c10, c11 = st.columns(3)
-            commission_rt = c9.text_input("Commission RT (optional)", key="limited_commission_rt")
-            pass_threshold = c10.text_input("Pass threshold % (optional)", key="limited_pass_threshold")
-            min_trades = c11.text_input("Min trades (optional)", key="limited_min_trades")
+            if isinstance(selected_workbook, dict):
+                st.subheader("4) Workbook Outputs + Pass Criteria")
+                default_output_rows = _build_workbook_output_rows(list(selected_workbook.get("outputs", [])))
+                default_rule_rows = _build_workbook_rule_rows(list(selected_workbook.get("pass_criteria", [])))
+                review_header_cols = st.columns([0.72, 0.28])
+                with review_header_cols[0]:
+                    st.caption("Structured workbook review rows. Edit labels and thresholds directly instead of maintaining freeform text.")
+                with review_header_cols[1]:
+                    if st.button("Reset to workbook defaults", key="limited_workbook_review_reset"):
+                        st.session_state["limited_workbook_output_rows"] = copy.deepcopy(default_output_rows)
+                        st.session_state["limited_workbook_rule_rows"] = copy.deepcopy(default_rule_rows)
+                        st.session_state.pop("limited_workbook_output_rows_editor", None)
+                        st.session_state.pop("limited_workbook_rule_rows_editor", None)
+                        st.rerun()
 
-            c12, c13 = st.columns(2)
-            favourable_criteria = c12.text_input("Favourable criteria JSON (optional)", key="limited_favourable_criteria")
-            extra_args = c13.text_input("Extra args (optional)", key="limited_extra_args")
+                output_seed_rows = _clean_workbook_output_rows(list(st.session_state.get("limited_workbook_output_rows", [])))
+                rule_seed_rows = _clean_workbook_rule_rows(list(st.session_state.get("limited_workbook_rule_rows", [])))
+                if not output_seed_rows and default_output_rows:
+                    output_seed_rows = copy.deepcopy(default_output_rows)
+                if not rule_seed_rows and default_rule_rows:
+                    rule_seed_rows = copy.deepcopy(default_rule_rows)
 
-            c14, c15, c16, c17 = st.columns(4)
-            seed_count = c14.text_input("Seed count (optional)", key="limited_seed_count")
-            seed_start = c15.text_input("Seed start (optional)", key="limited_seed_start")
-            exit_seed_count = c16.text_input("Exit seed count (optional)", key="limited_exit_seed_count")
-            exit_seed_start = c17.text_input("Exit seed start (optional)", key="limited_exit_seed_start")
+                review_cols = st.columns(2, gap="large")
+                with review_cols[0]:
+                    st.markdown("**Outputs**")
+                    output_editor_df = st.data_editor(
+                        pd.DataFrame(output_seed_rows, columns=["output_label", "mapped_metric", "notes"]),
+                        key="limited_workbook_output_rows_editor",
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "output_label": st.column_config.TextColumn("Output label", width="large"),
+                            "mapped_metric": st.column_config.SelectboxColumn(
+                                "Mapped metric",
+                                options=WORKBOOK_REVIEW_METRIC_OPTIONS,
+                                width="medium",
+                            ),
+                            "notes": st.column_config.TextColumn("Notes", width="medium"),
+                        },
+                    )
+                with review_cols[1]:
+                    st.markdown("**Pass Rules**")
+                    rule_editor_df = st.data_editor(
+                        pd.DataFrame(rule_seed_rows, columns=["rule_label", "mapped_metric", "operator", "threshold", "unit"]),
+                        key="limited_workbook_rule_rows_editor",
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="dynamic",
+                        column_config={
+                            "rule_label": st.column_config.TextColumn("Rule label", width="large"),
+                            "mapped_metric": st.column_config.SelectboxColumn(
+                                "Mapped metric",
+                                options=WORKBOOK_REVIEW_METRIC_OPTIONS,
+                                width="medium",
+                            ),
+                            "operator": st.column_config.SelectboxColumn(
+                                "Op",
+                                options=WORKBOOK_REVIEW_OPERATOR_OPTIONS,
+                                width="small",
+                            ),
+                            "threshold": st.column_config.NumberColumn("Threshold", width="small", format="%.4f"),
+                            "unit": st.column_config.SelectboxColumn(
+                                "Unit",
+                                options=WORKBOOK_REVIEW_UNIT_OPTIONS,
+                                width="small",
+                            ),
+                        },
+                    )
 
-            if st.button("Run limited tests", type="primary"):
+                workbook_output_rows = _clean_workbook_output_rows(output_editor_df.to_dict("records"))
+                workbook_rule_rows = _clean_workbook_rule_rows(rule_editor_df.to_dict("records"))
+                st.session_state["limited_workbook_output_rows"] = workbook_output_rows
+                st.session_state["limited_workbook_rule_rows"] = workbook_rule_rows
+
+                workbook_review_modified = (
+                    _workbook_rows_fingerprint(workbook_output_rows) != _workbook_rows_fingerprint(default_output_rows)
+                    or _workbook_rows_fingerprint(workbook_rule_rows) != _workbook_rows_fingerprint(default_rule_rows)
+                )
+                review_state = "Modified" if workbook_review_modified else "Workbook default"
+                st.caption(
+                    f"{review_state}. Reviewing {len(workbook_output_rows)} outputs. "
+                    f"PASS when all {len(workbook_rule_rows)} workbook rules are satisfied. "
+                    "Execution-specific thresholds remain in Advanced."
+                )
+
+            active_seed_mode = "none"
+            if str(current_entry_name or "") in monkey_entry_plugin_names:
+                active_seed_mode = "entry"
+            if str(current_exit_name or "") in monkey_exit_plugin_names:
+                active_seed_mode = "exit" if active_seed_mode == "none" else "entry"
+            if selected_monkey_mode == "Monkey Entry + Exit":
+                active_seed_mode = "entry"
+
+            seed_count = ""
+            seed_start = ""
+            exit_seed_count = ""
+            exit_seed_start = ""
+            if active_seed_mode != "none":
+                st.subheader("5) Monkey Sampling")
+                st.caption("Seed controls are shown only when the active scenario uses monkey entry or monkey exit logic.")
+
+            if active_seed_mode == "entry" and selected_monkey_mode == "Monkey Entry":
+                seed_cols = st.columns(2)
+                seed_count = seed_cols[0].text_input("Seed count (entry, optional)", key="limited_seed_count")
+                seed_start = seed_cols[1].text_input("Seed start (entry, optional)", key="limited_seed_start")
+                st.caption("Monkey Entry uses entry seeds only. Exit seeds are ignored for this mode.")
+            elif active_seed_mode == "exit" and selected_monkey_mode == "Monkey Exit":
+                seed_cols = st.columns(2)
+                exit_seed_count = seed_cols[0].text_input("Exit seed count (optional)", key="limited_exit_seed_count")
+                exit_seed_start = seed_cols[1].text_input("Exit seed start (optional)", key="limited_exit_seed_start")
+                st.caption("Monkey Exit uses exit seeds only. Entry seeds are ignored for this mode.")
+            elif active_seed_mode == "entry" and selected_monkey_mode == "Monkey Entry + Exit":
+                seed_cols = st.columns(2)
+                seed_count = seed_cols[0].text_input("Seed count (entry, optional)", key="limited_seed_count")
+                seed_start = seed_cols[1].text_input("Seed start (entry, optional)", key="limited_seed_start")
+                st.caption(
+                    "Baseline helper seeds entry only (recommended) to avoid entry-seed x exit-seed Cartesian blow-up. "
+                    "Exit seed fields remain hidden for this mode."
+                )
+            elif active_seed_mode == "entry":
+                seed_cols = st.columns(2)
+                seed_count = seed_cols[0].text_input("Seed count (entry)", key="limited_seed_count")
+                seed_start = seed_cols[1].text_input("Seed start (entry)", key="limited_seed_start")
+            elif active_seed_mode == "exit":
+                seed_cols = st.columns(2)
+                exit_seed_count = seed_cols[0].text_input("Exit seed count", key="limited_exit_seed_count")
+                exit_seed_start = seed_cols[1].text_input("Exit seed start", key="limited_exit_seed_start")
+
+            with st.expander("Advanced / technical overrides", expanded=selected_workbook is None):
+                st.caption(
+                    "Use this section when you need to override the scenario defaults, change plugins, or edit the engine-specific pass logic."
+                )
+                plugin_cols = st.columns(3)
+                entry_plugin = plugin_cols[0].selectbox("Entry plugin", [default_entry, *entry_plugins], key="limited_entry_plugin_select")
+                exit_plugin = plugin_cols[1].selectbox("Exit plugin", [default_exit, *exit_plugins], key="limited_exit_plugin_select")
+                sizing_plugin = plugin_cols[2].selectbox("Sizing plugin", [default_sizing, *sizing_plugins], key="limited_sizing_plugin_select")
+
+                selected_entry_name = entry_default_name if entry_plugin == default_entry else entry_plugin
+                selected_exit_name = exit_default_name if exit_plugin == default_exit else exit_plugin
+                selected_sizing_name = sizing_default_name if sizing_plugin == default_sizing else sizing_plugin
+
+                raw_param_cols = st.columns(2)
+                if not show_entry_json_in_main:
+                    entry_params = raw_param_cols[0].text_area(
+                        "Entry params JSON (advanced)",
+                        height=130,
+                        key="limited_entry_params_json",
+                    )
+                if not show_exit_json_in_main:
+                    exit_params = raw_param_cols[1].text_area(
+                        "Exit params JSON (advanced)",
+                        height=130,
+                        key="limited_exit_params_json",
+                    )
+
+                sizing_params = st.text_area("Sizing params JSON", height=110, key="limited_sizing_params_json")
+
+                eval_cols = st.columns(4)
+                pass_threshold = eval_cols[0].text_input("Pass threshold % (optional)", key="limited_pass_threshold")
+                min_trades = eval_cols[1].text_input("Min trades (optional)", key="limited_min_trades")
+                pip_size = eval_cols[2].text_input("Pip size", key="limited_pip_size")
+                progress_every = int(eval_cols[3].number_input("Progress every", min_value=1, step=1, key="limited_progress_every"))
+
+                favourable_criteria = st.text_area(
+                    "Favourable criteria JSON (optional)",
+                    height=86,
+                    key="limited_favourable_criteria",
+                )
+
+                c6, c7 = st.columns(2)
+                run_base = c6.text_input("Run base (optional)", key="limited_run_base")
+                test_name = c7.text_input("Test name (optional)", key="limited_test_name")
+                extra_args = st.text_area("Extra args (optional)", height=72, key="limited_extra_args")
+
+            if selected_monkey_mode:
+                st.markdown("#### Monkey Test (Baseline-Matched)")
+                st.caption(
+                    "Select a baseline limited run and apply a baseline-matched monkey setup. "
+                    "This auto-fills target trades/long ratio/avg hold, dominance criteria, and seed defaults. "
+                    "You can still edit the fields above after applying."
+                )
+                unlock_cols = st.columns([1.25, 2.75])
+                unlock_overrides = unlock_cols[0].checkbox(
+                    "Unlock overrides",
+                    key="limited_monkey_unlock_overrides",
+                    help="When off, baseline-derived monkey fields stay locked to the applied baseline setup.",
+                )
+                if unlock_overrides:
+                    unlock_cols[1].caption("Manual edits are allowed. Re-apply baseline setup to re-lock/refresh derived values.")
+                else:
+                    unlock_cols[1].caption("Baseline-derived monkey fields are locked after apply. Turn on Unlock overrides to edit them.")
+                monkey_base_opts = [p.as_posix() for p in limited_runs]
+                monkey_base_default = st.session_state.get("limited_monkey_baseline_run", "") or (monkey_base_opts[0] if monkey_base_opts else "")
+                monkey_base_run_raw = _select_path_from_options(
+                    "Baseline limited run",
+                    monkey_base_opts,
+                    monkey_base_default,
+                    key_prefix="limited_monkey_baseline",
+                )
+                if monkey_base_run_raw.strip():
+                    st.session_state["limited_monkey_baseline_run"] = monkey_base_run_raw.strip()
+                    loaded_base = _load_limited_run_artifacts(_abs_path(monkey_base_run_raw.strip()))
+                    monkey_baseline_loaded_ok = loaded_base is not None
+                else:
+                    loaded_base = None
+                    monkey_baseline_loaded_ok = None
+
+                selected_base_row: pd.Series | None = None
+                selected_base_metrics: dict[str, float] | None = None
+                if loaded_base is None and monkey_base_run_raw.strip():
+                    st.error("Could not load selected baseline limited run.")
+                elif loaded_base is not None:
+                    base_results, base_meta, _base_pass = loaded_base
+                    base_iter_options: list[int] = []
+                    if "iter" in base_results.columns:
+                        base_iter_options = (
+                            pd.to_numeric(base_results["iter"], errors="coerce")
+                            .dropna()
+                            .astype(int)
+                            .drop_duplicates()
+                            .sort_values()
+                            .tolist()
+                        )
+                    selected_base_iter: int | None = None
+                    if len(base_iter_options) > 1:
+                        selected_base_iter = st.selectbox(
+                            "Baseline iteration",
+                            base_iter_options,
+                            index=0,
+                            key="limited_monkey_baseline_iter",
+                        )
+                    elif len(base_results) > 1:
+                        st.warning("Baseline run has multiple rows; defaulting to first row. Select an iteration if available.")
+
+                    selected_base_row = _pick_limited_row(base_results, iter_id=selected_base_iter)
+                    if selected_base_row is not None:
+                        base_initial_eq = _infer_initial_equity_from_spec(base_meta.get("spec", {}) if isinstance(base_meta, dict) else {})
+                        selected_base_metrics = _limited_baseline_metrics_from_row(selected_base_row, initial_equity=base_initial_eq)
+                        _render_metric_row(
+                            [
+                                ("Base Trades", selected_base_metrics.get("trades", float("nan")), "{:.0f}"),
+                                ("Base Long %", selected_base_metrics.get("long_trade_pct", float("nan")), "{:.2f}"),
+                                ("Base Avg Hold", selected_base_metrics.get("avg_bars_held", float("nan")), "{:.2f}"),
+                                ("Base Return %", selected_base_metrics.get("total_return_%", float("nan")), "{:.2f}"),
+                            ]
+                        )
+                        _render_metric_row(
+                            [
+                                ("Base MaxDD %", selected_base_metrics.get("max_drawdown_abs_%", float("nan")), "{:.2f}"),
+                                ("Monkey Seeds", 8000, "{:d}"),
+                                ("Davey PASS Floor %", 90, "{:d}"),
+                                ("Constraint Note", "filter in Results tab", "{}"),
+                            ]
+                        )
+
+                        def _apply_baseline_monkey_preset(mode_label: str) -> None:
+                            assert selected_base_metrics is not None
+                            base_trades = selected_base_metrics.get("trades", float("nan"))
+                            base_long_pct = selected_base_metrics.get("long_trade_pct", float("nan"))
+                            base_avg_hold = selected_base_metrics.get("avg_bars_held", float("nan"))
+                            base_ret = selected_base_metrics.get("total_return_%", float("nan"))
+                            base_dd = selected_base_metrics.get("max_drawdown_abs_%", float("nan"))
+                            if not (np.isfinite(base_trades) and base_trades > 0 and np.isfinite(base_ret) and np.isfinite(base_dd)):
+                                raise ValueError("Baseline run row is missing required metrics (trades, return, max drawdown).")
+
+                            target_entries = max(1, int(round(float(base_trades))))
+                            long_ratio = 0.5
+                            if np.isfinite(base_long_pct):
+                                long_ratio = max(0.0, min(1.0, float(base_long_pct) / 100.0))
+                            avg_hold = 10.0
+                            if np.isfinite(base_avg_hold) and float(base_avg_hold) > 0:
+                                avg_hold = float(base_avg_hold)
+
+                            criteria = _build_monkey_dominance_criteria(
+                                baseline_return_pct=float(base_ret),
+                                baseline_max_dd_pct=float(base_dd),
+                            )
+                            pending_updates: dict[str, Any] = {}
+                            if mode_label in {"Monkey Entry", "Monkey Entry + Exit"}:
+                                pending_updates["limited_entry_plugin_select"] = "monkey_entry"
+                                pending_updates["limited_entry_params_json"] = _json_pretty(
+                                    {"target_entries": target_entries, "side": "both", "long_ratio": long_ratio}
+                                )
+                                pending_updates["limited_seed_count"] = "8000"
+                                pending_updates["limited_seed_start"] = "1"
+                            if mode_label == "Monkey Exit":
+                                pending_updates["limited_entry_plugin_select"] = default_entry
+                                pending_updates["limited_seed_count"] = ""
+                                pending_updates["limited_seed_start"] = ""
+
+                            if mode_label in {"Monkey Exit", "Monkey Entry + Exit"}:
+                                pending_updates["limited_exit_plugin_select"] = "monkey_exit"
+                                pending_updates["limited_exit_params_json"] = _json_pretty({"avg_hold_bars": avg_hold})
+                                if mode_label == "Monkey Exit":
+                                    pending_updates["limited_exit_seed_count"] = "8000"
+                                    pending_updates["limited_exit_seed_start"] = "1"
+                                else:
+                                    # Avoid Cartesian explosion (entry seeds x exit seeds).
+                                    pending_updates["limited_exit_seed_count"] = ""
+                                    pending_updates["limited_exit_seed_start"] = ""
+                            if mode_label == "Monkey Entry":
+                                pending_updates["limited_exit_plugin_select"] = default_exit
+                                pending_updates["limited_exit_seed_count"] = ""
+                                pending_updates["limited_exit_seed_start"] = ""
+
+                            pending_updates["limited_favourable_criteria"] = json.dumps(criteria, separators=(",", ":"))
+                            pending_updates["limited_pass_threshold"] = "90"
+                            # Monkey tests should not fail due to a separate trade-count gate.
+                            # Trade-count matching is handled by the monkey prefilter (for supported modes).
+                            pending_updates["limited_min_trades"] = "0"
+                            pending_updates["limited_test_name"] = (
+                                "monkey_entry_exit_test__baseline_matched"
+                                if mode_label == "Monkey Entry + Exit"
+                                else ("monkey_entry_test__baseline_matched" if mode_label == "Monkey Entry" else "monkey_exit_test__baseline_matched")
+                            )
+                            monkey_prefilter_args_parts: list[str] = []
+                            monkey_runtime_args_parts: list[str] = ["--monkey-davey-style"]
+                            if mode_label in {"Monkey Exit", "Monkey Entry + Exit"}:
+                                monkey_prefilter_args_parts.extend(
+                                    [
+                                        "--monkey-match-prefilter",
+                                        "--monkey-match-target-trades",
+                                        str(target_entries),
+                                        "--monkey-match-trade-tol-pct",
+                                        "5",
+                                    ]
+                                )
+                                if np.isfinite(base_long_pct):
+                                    monkey_prefilter_args_parts.extend(
+                                        ["--monkey-match-target-long-pct", f"{float(base_long_pct):.6g}", "--monkey-match-long-tol-pp", "5"]
+                                    )
+                                if np.isfinite(avg_hold) and float(avg_hold) > 0:
+                                    monkey_prefilter_args_parts.extend(
+                                        ["--monkey-match-target-avg-hold", f"{float(avg_hold):.6g}", "--monkey-match-hold-tol-pct", "5"]
+                                    )
+                                monkey_runtime_args_parts.append("--monkey-fast-summary")
+                            pending_updates["limited_extra_args"] = " ".join(
+                                shlex.quote(str(x))
+                                for x in [*monkey_prefilter_args_parts, *monkey_runtime_args_parts]
+                            )
+                            pending_updates["limited_monkey_unlock_overrides"] = False
+
+                            derived_fields_payload: dict[str, Any] = {
+                                "mode": mode_label,
+                                "limited_entry_plugin_select": str(
+                                    pending_updates.get("limited_entry_plugin_select", st.session_state.get("limited_entry_plugin_select", ""))
+                                ),
+                                "limited_exit_plugin_select": str(
+                                    pending_updates.get("limited_exit_plugin_select", st.session_state.get("limited_exit_plugin_select", ""))
+                                ),
+                                "limited_entry_params_json": str(
+                                    pending_updates.get("limited_entry_params_json", st.session_state.get("limited_entry_params_json", ""))
+                                ),
+                                "limited_exit_params_json": str(
+                                    pending_updates.get("limited_exit_params_json", st.session_state.get("limited_exit_params_json", ""))
+                                ),
+                                "limited_seed_count": str(pending_updates.get("limited_seed_count", st.session_state.get("limited_seed_count", ""))),
+                                "limited_seed_start": str(pending_updates.get("limited_seed_start", st.session_state.get("limited_seed_start", ""))),
+                                "limited_exit_seed_count": str(
+                                    pending_updates.get("limited_exit_seed_count", st.session_state.get("limited_exit_seed_count", ""))
+                                ),
+                                "limited_exit_seed_start": str(
+                                    pending_updates.get("limited_exit_seed_start", st.session_state.get("limited_exit_seed_start", ""))
+                                ),
+                                "limited_favourable_criteria": str(
+                                    pending_updates.get("limited_favourable_criteria", st.session_state.get("limited_favourable_criteria", ""))
+                                ),
+                                "limited_pass_threshold": str(
+                                    pending_updates.get("limited_pass_threshold", st.session_state.get("limited_pass_threshold", ""))
+                                ),
+                                "limited_min_trades": str(pending_updates.get("limited_min_trades", st.session_state.get("limited_min_trades", ""))),
+                                "limited_test_name": str(pending_updates.get("limited_test_name", st.session_state.get("limited_test_name", ""))),
+                                "limited_extra_args": str(pending_updates.get("limited_extra_args", st.session_state.get("limited_extra_args", ""))),
+                                "baseline_run": str(st.session_state.get("limited_monkey_baseline_run", "")),
+                                "baseline_iter": selected_base_iter,
+                            }
+                            pending_updates["limited_monkey_derived_fields"] = derived_fields_payload
+                            st.session_state["_limited_pending_form_updates"] = pending_updates
+                            st.session_state["_limited_prefill_lock"] = True
+                            st.rerun()
+
+                        helper_key_suffix = selected_monkey_mode.lower().replace(" ", "_").replace("+", "plus")
+                        if st.button(
+                            f"Apply Baseline-Matched Setup ({selected_monkey_mode})",
+                            key=f"limited_apply_{helper_key_suffix}_from_baseline",
+                            type="secondary",
+                        ):
+                            try:
+                                _apply_baseline_monkey_preset(selected_monkey_mode)
+                            except Exception as e:
+                                st.error(f"Unable to apply baseline-matched monkey setup: {e}")
+                        if selected_monkey_mode == "Monkey Entry + Exit":
+                            st.caption(
+                                "For `Monkey Entry + Exit`, the helper seeds entry only (8,000) to avoid entry-seed x exit-seed Cartesian blow-up. "
+                                "Use Results > Limited tests > Constrained Dominance to apply the ±5% filters against your baseline."
+                            )
+
+            def _json_check(label: str, raw_text: str) -> tuple[bool, str, str]:
+                text = raw_text.strip()
+                if not text:
+                    return True, label, "blank (optional)"
                 try:
+                    json.loads(text)
+                    return True, label, "valid JSON"
+                except Exception as e:
+                    return False, label, f"invalid JSON: {e}"
+
+            def _numeric_check(label: str, raw_text: str) -> tuple[bool, str, str]:
+                text = raw_text.strip()
+                if not text:
+                    return True, label, "blank (optional)"
+                try:
+                    float(text)
+                    return True, label, "valid number"
+                except Exception:
+                    return False, label, "invalid number"
+
+            checklist_rows: list[dict[str, Any]] = []
+            for ok, label, detail in (
+                _json_check("Entry params JSON", entry_params),
+                _json_check("Exit params JSON", exit_params),
+                _json_check("Sizing params JSON", sizing_params),
+                _numeric_check("Slippage / spread (pips)", spread_pips),
+                _numeric_check("Commission RT", commission_rt),
+                _numeric_check("Pip size", pip_size),
+            ):
+                checklist_rows.append({"Check": label, "Status": "OK" if ok else "Fix", "Details": detail, "_ok": ok})
+            for ok, label, detail in structured_input_checks:
+                checklist_rows.append({"Check": label, "Status": "OK" if ok else "Fix", "Details": detail, "_ok": ok})
+
+            if selected_monkey_mode:
+                entry_is_monkey = str(selected_entry_name or "") == "monkey_entry"
+                exit_is_monkey = str(selected_exit_name or "") == "monkey_exit"
+                if selected_monkey_mode == "Monkey Entry":
+                    mode_ok = entry_is_monkey and (not exit_is_monkey)
+                    mode_detail = "Expect monkey entry + non-monkey exit."
+                    seeds_ok = bool(seed_count.strip())
+                    seeds_detail = "Entry seed count required." if not seeds_ok else f"Entry seeds={seed_count.strip()}."
+                elif selected_monkey_mode == "Monkey Exit":
+                    mode_ok = (not entry_is_monkey) and exit_is_monkey
+                    mode_detail = "Expect non-monkey entry + monkey exit."
+                    seeds_ok = bool(exit_seed_count.strip())
+                    seeds_detail = "Exit seed count required." if not seeds_ok else f"Exit seeds={exit_seed_count.strip()}."
+                else:
+                    mode_ok = entry_is_monkey and exit_is_monkey
+                    mode_detail = "Expect monkey entry + monkey exit."
+                    seeds_ok = bool(seed_count.strip())
+                    seeds_detail = "Entry seed count required (helper uses entry-only seeds)." if not seeds_ok else f"Entry seeds={seed_count.strip()}."
+
+                criteria_ok = bool(favourable_criteria.strip()) and bool(pass_threshold.strip()) and bool(min_trades.strip())
+                criteria_detail = (
+                    "Need favourable criteria + pass threshold + min trades."
+                    if not criteria_ok
+                    else "Criteria/threshold/min-trades set."
+                )
+                baseline_selected = bool(monkey_base_run_raw.strip())
+                baseline_ok = bool(monkey_baseline_loaded_ok) if baseline_selected else False
+                baseline_detail = (
+                    "Select a baseline limited run."
+                    if not baseline_selected
+                    else ("Loaded baseline run." if baseline_ok else "Selected baseline could not be loaded.")
+                )
+                lock_payload = st.session_state.get("limited_monkey_derived_fields")
+                lock_matches = (
+                    isinstance(lock_payload, dict)
+                    and str(lock_payload.get("mode", "")) == str(selected_monkey_mode)
+                    and str(lock_payload.get("baseline_run", "")).strip() == monkey_base_run_raw.strip()
+                )
+                lock_detail = (
+                    "Derived fields locked to applied baseline."
+                    if (not bool(st.session_state.get("limited_monkey_unlock_overrides", False)) and lock_matches)
+                    else (
+                        "Overrides unlocked (manual edits allowed)."
+                        if bool(st.session_state.get("limited_monkey_unlock_overrides", False))
+                        else "Apply baseline-matched setup to lock derived fields."
+                    )
+                )
+                lock_ok = bool(st.session_state.get("limited_monkey_unlock_overrides", False)) or lock_matches
+
+                checklist_rows.extend(
+                    [
+                        {"Check": "Monkey mode plugins", "Status": "OK" if mode_ok else "Fix", "Details": mode_detail, "_ok": mode_ok},
+                        {"Check": "Monkey seeds", "Status": "OK" if seeds_ok else "Fix", "Details": seeds_detail, "_ok": seeds_ok},
+                        {"Check": "Baseline run", "Status": "OK" if baseline_ok else "Fix", "Details": baseline_detail, "_ok": baseline_ok},
+                        {"Check": "Dominance criteria", "Status": "OK" if criteria_ok else "Fix", "Details": criteria_detail, "_ok": criteria_ok},
+                        {"Check": "Baseline-derived fields", "Status": "OK" if lock_ok else "Fix", "Details": lock_detail, "_ok": lock_ok},
+                    ]
+                )
+
+            ready_ok = all(bool(r.get("_ok", False)) for r in checklist_rows)
+            st.subheader("6) Run")
+            run_cols = st.columns([0.28, 0.72], gap="large")
+            with run_cols[0]:
+                _render_status_badge("Run Readiness", ready_ok)
+            with run_cols[1]:
+                st.caption(
+                    "Validation is computed from the current form state. Review the detailed checks if you are running a monkey workflow or custom JSON."
+                )
+                auto_run_after_prefill = bool(st.session_state.pop("_limited_auto_run_after_prefill", False))
+                run_limited_clicked = st.button("Run limited tests", type="primary")
+            st.caption(
+                f"Run target: scenario=`{selected_workbook_template}` | "
+                f"entry=`{selected_entry_name or 'none'}` | "
+                f"exit=`{selected_exit_name or 'none'}` | "
+                f"spread={spread_pips or 'default'} pips"
+            )
+            checklist_df = pd.DataFrame([{k: v for k, v in r.items() if not str(k).startswith("_")} for r in checklist_rows])
+            with st.expander("Validation details", expanded=not ready_ok):
+                st.dataframe(checklist_df, use_container_width=True, hide_index=True)
+
+            if run_limited_clicked or auto_run_after_prefill:
+                try:
+                    if auto_run_after_prefill and not run_limited_clicked:
+                        st.info("Auto-running selected workbook scenario with prefilled fields.")
                     cmd = [
                         SCRIPT_PYTHON,
                         str(SCRIPTS_DIR / "run_limited_tests.py"),
@@ -2618,8 +5114,12 @@ def main() -> None:
                     if sizing_params_raw:
                         cmd.extend(["--sizing-params", sizing_params_raw])
 
+                    if spread_pips.strip():
+                        cmd.extend(["--spread-pips", spread_pips.strip()])
                     if commission_rt.strip():
                         cmd.extend(["--commission-rt", commission_rt.strip()])
+                    if pip_size.strip():
+                        cmd.extend(["--pip-size", pip_size.strip()])
                     if seed_count_raw:
                         cmd.extend(["--seed-count", seed_count_raw])
                     if seed_start_raw:
@@ -2635,10 +5135,28 @@ def main() -> None:
                     if min_trades.strip():
                         cmd.extend(["--min-trades", min_trades.strip()])
 
-                    cmd.extend(_parse_extra_args(extra_args))
+                    extra_tokens = _parse_extra_args(extra_args)
+                    monkey_plugins = {"monkey_entry", "monkey_exit", "random", "random_time_exit"}
+                    uses_monkey_plugin = (
+                        str(selected_entry_name or "").strip() in monkey_plugins
+                        or str(selected_exit_name or "").strip() in monkey_plugins
+                    )
+                    if uses_monkey_plugin:
+                        if not _cli_flag_present(extra_tokens, "--monkey-davey-style"):
+                            extra_tokens.append("--monkey-davey-style")
+                        if not _cli_flag_present(extra_tokens, "--no-save-trades"):
+                            cmd.append("--no-save-trades")
+                        if not _cli_flag_present(extra_tokens, "--signal-cache-max"):
+                            cmd.extend(["--signal-cache-max", "0"])
+
+                    cmd.extend(extra_tokens)
                 except ValueError as e:
                     st.error(f"Invalid arguments: {e}")
                 else:
+                    st.info(
+                        f"Running `{selected_workbook_template}` on `{strategy_short}` using `{Path(data_path).name}`. "
+                        "Progress updates stream below."
+                    )
                     rc, out = _run_cli_live(cmd, workflow="limited")
                     if rc == 0:
                         saved_csv = _extract_saved_path(out, "Saved:")
@@ -2651,170 +5169,16 @@ def main() -> None:
                             else:
                                 st.warning(f"Limited-test HTML auto-generation failed: {msg}")
 
-    elif page == "download_data":
-        st.header("Download Data")
+            last_limited = st.session_state.get("last_limited_run", "")
+            if last_limited:
+                st.markdown("---")
+                st.subheader("Last limited test output")
+                _render_limited_workbook_summary(_abs_path(last_limited), strategy_catalog=strategy_catalog)
 
-        provider = st.selectbox(
-            "Provider",
-            options=("dukascopy", "mt5_ftmo"),
-            format_func=lambda p: "Dukascopy FX" if p == "dukascopy" else "MT5 / FTMO",
-            key="download_provider",
-        )
-
-        symbol = "EURUSD"
-        timeframe = "1H"
-        mt5_backend = "silicon"
-        mt5_host = "localhost"
-        mt5_port = 8001
-        mt5_login_raw = ""
-        mt5_password = ""
-        mt5_server = ""
-        mt5_terminal_path = ""
-        mt5_batch_size = 1000
-        mt5_max_backfill_batches = 15000
-        mt5_progress_every = 25
-        mt5_allow_incomplete = False
-
-        c_date_1, c_date_2 = st.columns(2)
-        start_date = c_date_1.date_input("Start date", value=date(2010, 1, 1), key="download_start_date")
-        end_date = c_date_2.date_input("End date", value=date.today(), key="download_end_date")
-
-        if provider == "dukascopy":
-            default_idx = download_symbols.index("EURUSD") if "EURUSD" in download_symbols else 0
-            default_tf_idx = download_timeframes.index("1H") if "1H" in download_timeframes else 0
-            c1, c2 = st.columns(2)
-            symbol = c1.selectbox("Symbol", download_symbols, index=default_idx, key="download_symbol_dk")
-            timeframe = c2.selectbox("Timeframe", download_timeframes, index=default_tf_idx, key="download_tf_dk")
-            st.caption(
-                f"Available Dukascopy FX symbols: {len(download_symbols)} | "
-                f"timeframes: {len(download_timeframes)}"
-            )
-        else:
-            c1, c2, c3 = st.columns(3)
-            mt5_backend = c1.selectbox(
-                "MT5 backend",
-                options=("silicon", "auto", "native"),
-                index=0,
-                key="download_mt5_backend",
-            )
-            mt5_host = c2.text_input("MT5 host", value="localhost", key="download_mt5_host").strip() or "localhost"
-            mt5_port = int(c3.number_input("MT5 port", min_value=1, max_value=65535, value=8001, step=1, key="download_mt5_port"))
-
-            mt5_timeframes = _discover_mt5_download_timeframes(mt5_backend, mt5_host, mt5_port)
-            default_mt5_tf_idx = mt5_timeframes.index("M5") if "M5" in mt5_timeframes else 0
-            c4, c5 = st.columns(2)
-            symbol = c4.text_input("Symbol", value="EURUSD", key="download_symbol_mt5").strip().upper() or "EURUSD"
-            timeframe = c5.selectbox("Timeframe", mt5_timeframes, index=default_mt5_tf_idx, key="download_tf_mt5")
-
-            c6, c7, c8 = st.columns(3)
-            mt5_login_raw = c6.text_input("MT5 login (optional)", value="", key="download_mt5_login")
-            mt5_password = c7.text_input("MT5 password (optional)", value="", type="password", key="download_mt5_password")
-            mt5_server = c8.text_input("MT5 server (optional)", value="", key="download_mt5_server")
-            mt5_terminal_path = st.text_input("MT5 terminal path (native backend only)", value="", key="download_mt5_terminal_path")
-
-            c9, c10, c11, c12 = st.columns(4)
-            mt5_batch_size = int(c9.number_input("Batch size", min_value=10, max_value=20000, value=1000, step=10, key="download_mt5_batch_size"))
-            mt5_max_backfill_batches = int(
-                c10.number_input(
-                    "Max backfill batches",
-                    min_value=10,
-                    max_value=200000,
-                    value=15000,
-                    step=100,
-                    key="download_mt5_max_backfill_batches",
-                )
-            )
-            mt5_progress_every = int(
-                c11.number_input(
-                    "Progress every N batches",
-                    min_value=0,
-                    max_value=10000,
-                    value=25,
-                    step=1,
-                    key="download_mt5_progress_every",
-                )
-            )
-            mt5_allow_incomplete = c12.checkbox("Allow incomplete", value=False, key="download_mt5_allow_incomplete")
-            st.caption(f"Detected MT5 timeframes: {len(mt5_timeframes)} (from connected backend if available)")
-
-        c_common_1, c_common_2, c_common_3 = st.columns(3)
-        file_ext = c_common_1.selectbox("File extension", ("csv", "parquet"), key="download_file_ext")
-        save_dir = c_common_2.text_input("Save directory", value="data/processed", key="download_save_dir")
-        extra_args = c_common_3.text_input("Extra args (optional)", value="", key="download_extra_args")
-
-        if st.button("Download data", type="primary"):
-            try:
-                if start_date >= end_date:
-                    raise ValueError("Start date must be earlier than end date")
-
-                cmd = [
-                    SCRIPT_PYTHON,
-                    str(SCRIPTS_DIR / "download_data.py"),
-                    "--provider",
-                    provider,
-                    "--symbol",
-                    symbol.strip().upper(),
-                    "--timeframe",
-                    timeframe,
-                    "--start",
-                    start_date.isoformat(),
-                    "--end",
-                    end_date.isoformat(),
-                    "--save-dir",
-                    save_dir.strip(),
-                    "--file-ext",
-                    file_ext,
-                ]
-                if provider == "mt5_ftmo":
-                    cmd.extend(
-                        [
-                            "--mt5-backend",
-                            mt5_backend,
-                            "--mt5-host",
-                            mt5_host,
-                            "--mt5-port",
-                            str(int(mt5_port)),
-                            "--mt5-batch-size",
-                            str(int(mt5_batch_size)),
-                            "--mt5-max-backfill-batches",
-                            str(int(mt5_max_backfill_batches)),
-                            "--mt5-progress-every",
-                            str(int(mt5_progress_every)),
-                        ]
-                    )
-                    if mt5_login_raw.strip():
-                        try:
-                            int(mt5_login_raw.strip())
-                        except ValueError as e:
-                            raise ValueError("MT5 login must be an integer when provided.") from e
-                        cmd.extend(["--mt5-login", mt5_login_raw.strip()])
-                    if mt5_password.strip():
-                        cmd.extend(["--mt5-password", mt5_password.strip()])
-                    if mt5_server.strip():
-                        cmd.extend(["--mt5-server", mt5_server.strip()])
-                    if mt5_terminal_path.strip():
-                        cmd.extend(["--mt5-terminal-path", mt5_terminal_path.strip()])
-                    if mt5_allow_incomplete:
-                        cmd.append("--mt5-allow-incomplete")
-                cmd.extend(_parse_extra_args(extra_args))
-            except ValueError as e:
-                st.error(f"Invalid arguments: {e}")
-            else:
-                rc, out = _run_cli_live(cmd, workflow="download")
-                if rc == 0:
-                    dataset_path = _extract_path_after_marker(out, "rows to:")
-                    if dataset_path is None:
-                        dataset_path = _extract_path_after_marker(out, "Saved dataset:")
-                    meta_path = _extract_path_after_marker(out, "Metadata:")
-                    if dataset_path is not None:
-                        st.session_state["last_downloaded_dataset"] = dataset_path.as_posix()
-                        st.success(f"Dataset saved: {_rel(dataset_path)}")
-                    if meta_path is not None:
-                        st.info(f"Metadata saved: {_rel(meta_path)}")
 
     elif page == "results":
         st.header("Results")
-        t_wf, t_mc, t_limited = st.tabs(["Walk-forward", "Monte Carlo", "Limited tests"])
+        t_limited, t_wf, t_mc, t_live = st.tabs(["Limited tests", "Walk-forward", "Monte Carlo", "Live pilot"])
 
         with t_wf:
             options = [p.as_posix() for p in walk_runs]
@@ -2842,6 +5206,51 @@ def main() -> None:
                 _render_limited_results(_abs_path(run_dir_raw.strip()), strategy_catalog=strategy_catalog)
             else:
                 st.info("No limited run selected.")
+
+        with t_live:
+            mc_options = [p.as_posix() for p in mc_runs]
+            mc_default = st.session_state["last_mc_run"] or (mc_options[0] if mc_options else "")
+            mc_run_raw = _select_path_from_options("Monte Carlo run", mc_options, mc_default, key_prefix="res_live_mc")
+
+            live_options = [_rel(p) for p in live_trade_files]
+            live_default = st.session_state["last_live_trades_file"] or (live_options[0] if live_options else "")
+            live_trades_raw = _select_path_from_options("Live trades CSV", live_options, live_default, key_prefix="res_live_trades")
+
+            if mc_run_raw.strip() and live_trades_raw.strip():
+                live_abs = _abs_path(live_trades_raw.strip())
+                st.session_state["last_live_trades_file"] = live_trades_raw.strip()
+                _render_live_pilot_results(mc_run_dir=_abs_path(mc_run_raw.strip()), live_trades_path=live_abs)
+            else:
+                st.info("Select both a Monte Carlo run and a live-trades CSV.")
+
+        with st.expander("Clean up run outputs"):
+            st.markdown(
+                "Use this to delete old run directories under `runs/`. By default this is a dry run to avoid accidental data loss."
+            )
+            keep_runs = st.number_input(
+                "Keep most recent run directories per workflow", min_value=0, value=1, help="Set to 0 to delete all run directories for each workflow."
+            )
+            dry_run = st.checkbox(
+                "Dry run (no deletions)",
+                value=True,
+                help="Preview what would be deleted. Uncheck to actually delete folders (requires explicit confirmation).",
+            )
+
+            if st.button("Run cleanup"):
+                cmd = [
+                    SCRIPT_PYTHON,
+                    str(SCRIPTS_DIR / "clean_runs.py"),
+                    "--keep",
+                    str(keep_runs),
+                ]
+                if not dry_run:
+                    cmd.append("--force")
+
+                rc, out = _run_cli_live(cmd, workflow="cleanup")
+                if rc == 0:
+                    st.success("Cleanup completed.")
+                else:
+                    st.error("Cleanup command failed. See output above.")
 
     else:
         _render_reference_page(strategy_catalog, plugin_catalog)

@@ -6,10 +6,27 @@ from pathlib import Path
 
 
 def load_json_arg(value: str):
-    path = Path(value)
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return json.loads(value)
+    if isinstance(value, (dict, list)):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return {}
+
+    # Prefer inline JSON first (common for CLI/UI multiline text input),
+    # so very long JSON strings are not mistaken for filesystem paths.
+    if text[0] in "{[":
+        return json.loads(text)
+
+    path = Path(text)
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        # Path construction/stat may fail for extremely long strings;
+        # fall back to parsing as inline JSON.
+        pass
+    return json.loads(text)
 
 
 def parse_favourable_criteria(value):

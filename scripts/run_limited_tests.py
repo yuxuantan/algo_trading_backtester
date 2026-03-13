@@ -42,6 +42,7 @@ python scripts/run_limited_tests.py \
   --seed-start 1 \
   --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
   --pass-threshold 90 \
+  --monkey-davey-style \
   --commission-rt 5
 
 Example (monkey exit: random exit timing around core avg bars held):
@@ -54,6 +55,7 @@ python scripts/run_limited_tests.py \
   --exit-seed-start 1 \
   --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
   --pass-threshold 90 \
+  --monkey-davey-style \
   --commission-rt 5
 
 Example (monkey entry + monkey exit):
@@ -68,6 +70,7 @@ python scripts/run_limited_tests.py \
   --exit-params '{"avg_hold_bars":15.75}' \
   --favourable-criteria '{"mode":"all","rules":[{"metric":"total_return_%","op":"<","value":16.3},{"metric":"max_drawdown_abs_%","op":">","value":11.4}]}' \
   --pass-threshold 90 \
+  --monkey-davey-style \
   --commission-rt 5
 """
 

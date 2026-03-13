@@ -329,6 +329,7 @@ def run_backtest_limited(
     summary = {
         "trades": int(len(trades_df)),
         "final_equity": float(equity_df["equity"].iloc[-1]),
+        "net_profit_abs": float(equity_df["equity"].iloc[-1] - float(cfg.initial_equity)),
         "total_return_%": float(total_return),
         "max_drawdown_%": mdd_pct,
         "max_drawdown_abs_%": mdd_abs_pct,
