@@ -3,7 +3,7 @@ Interactive Plotly chart for limited test outputs.
 
 Example:
 python3 scripts/plot_limited_results.py \
-  --run-dir runs/limited/sma_cross_test_strat/eurusd_1h_20100101_20130101/core_system_test__sma_cross__fixed_atr_exit/run_ddmmyy_hhmmss
+  --run-dir runs/strategies/sma_cross_strategy/limited/core/eurusd_1h/2010-01-01_2013-01-01/run_2026-03-14_15-40-57
 """
 
 from __future__ import annotations
@@ -166,8 +166,8 @@ def build_figure(*, results: pd.DataFrame, pass_summary: dict, title: str):
 
 def main():
     parser = argparse.ArgumentParser("Plot interactive chart for limited test run.")
-    parser.add_argument("--run-dir", required=True, help="Path to limited test run_x folder.")
-    parser.add_argument("--output", default=None, help="Output HTML path. Default: <run-dir>/limited_interactive.html")
+    parser.add_argument("--run-dir", required=True, help="Path to limited test run folder.")
+    parser.add_argument("--output", default=None, help="Output HTML path. Default: <run-dir>/plots/interactive.html")
     parser.add_argument("--title", default=None, help="Chart title.")
     parser.add_argument("--show", action="store_true", help="Open interactive window after writing HTML.")
     args = parser.parse_args()
@@ -176,10 +176,10 @@ def main():
         raise SystemExit("plotly is not installed. Install it with: pip install plotly")
 
     run_dir = Path(args.run_dir)
-    results_path = run_dir / "limited_results.csv"
-    pass_path = run_dir / "pass_summary.json"
+    results_path = run_dir / "tables" / "iterations.csv"
+    pass_path = run_dir / "summary.json"
     if not results_path.exists():
-        raise ValueError(f"missing limited_results.csv in {run_dir}")
+        raise ValueError(f"missing tables/iterations.csv in {run_dir}")
 
     results = pd.read_csv(results_path)
     pass_summary = _read_json(pass_path)
@@ -187,7 +187,8 @@ def main():
     title = args.title or f"Limited Test - {run_dir.name}"
     fig = build_figure(results=results, pass_summary=pass_summary, title=title)
 
-    output = Path(args.output) if args.output else run_dir / "limited_interactive.html"
+    output = Path(args.output) if args.output else run_dir / "plots" / "interactive.html"
+    output.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(output, include_plotlyjs="cdn", full_html=True)
     print(f"Saved interactive chart: {output}")
     if args.show:

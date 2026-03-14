@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from quantbt.artifacts import (
+    make_montecarlo_run_dir,
+    montecarlo_quantile_paths_path,
+    montecarlo_sample_paths_path,
+    montecarlo_simulations_path,
+    spec_path,
+    summary_path,
+    tables_dir,
+    walkforward_oos_equity_path,
+    walkforward_oos_trades_path,
+    write_manifest,
+)
 from quantbt.core.performance import cagr_pct, sortino_ratio_from_returns, years_from_index
+from quantbt.io.datasets import dataset_tag_for_runs
 
 
 def _read_json(path: Path) -> dict:
@@ -20,32 +32,26 @@ def _write_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
 
 
-def _make_mc_run_dir(run_dir: Path) -> Path:
-    base = run_dir / "monte_carlo"
-    base.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%d%m%y_%H%M%S")
-    stem = f"run_{ts}"
-    out = base / stem
-    suffix = 1
-    while out.exists():
-        suffix += 1
-        out = base / f"{stem}_{suffix:02d}"
-    out.mkdir(parents=True, exist_ok=False)
-    return out
+def _base_from_strategy_run_dir(run_dir: Path) -> Path:
+    parts = list(run_dir.resolve().parts)
+    if "strategies" in parts:
+        idx = parts.index("strategies")
+        return Path(*parts[:idx]) if idx > 0 else Path(".")
+    return Path("runs")
 
 
 def _load_initial_equity(run_dir: Path) -> float:
-    cfg = _read_json(run_dir / "config.json")
+    cfg = _read_json(spec_path(run_dir))
     bt = cfg.get("backtest_config", {})
     if isinstance(bt, dict) and bt.get("initial_equity") is not None:
         return float(bt["initial_equity"])
 
-    eq_path = run_dir / "oos_equity_curve.csv"
+    eq_path = walkforward_oos_equity_path(run_dir)
     if eq_path.exists():
         eq = pd.read_csv(eq_path)
         if not eq.empty and "equity" in eq.columns:
             return float(eq["equity"].iloc[0])
-    raise ValueError("could not infer initial equity from run config or oos_equity_curve.csv")
+    raise ValueError("could not infer initial equity from run spec or tables/oos_equity_curve.csv")
 
 
 def _build_trade_pool(
@@ -60,14 +66,14 @@ def _build_trade_pool(
         if fixed_risk_dollars is None or fixed_risk_dollars <= 0:
             raise ValueError("--fixed-risk-dollars must be > 0 when pnl-mode=fixed_risk")
         if "r_multiple" not in trades_df.columns:
-            raise ValueError("oos_trades.csv missing r_multiple required for pnl-mode=fixed_risk")
+            raise ValueError("tables/oos_trades.csv missing r_multiple required for pnl-mode=fixed_risk")
         r = pd.to_numeric(trades_df["r_multiple"], errors="coerce").dropna().to_numpy(dtype=float)
         pool = r * float(fixed_risk_dollars)
     else:
         raise ValueError(f"unsupported pnl_mode: {pnl_mode}")
 
     if len(pool) == 0:
-        raise ValueError("no valid trades found in oos_trades.csv")
+        raise ValueError("no valid trades found in tables/oos_trades.csv")
     return pool
 
 
@@ -206,9 +212,15 @@ def run_monte_carlo(
     target_return_dd_ratio_min: float,
 ) -> Path:
     run_dir = Path(run_dir)
-    trades_path = run_dir / "oos_trades.csv"
+    wf_spec = _read_json(spec_path(run_dir))
+    strategy = str(wf_spec.get("strategy", "")).rsplit(".", 1)[-1] or "strategy"
+    dataset = wf_spec.get("dataset")
+    dataset_meta = wf_spec.get("dataset_meta", {})
+    dataset_tag = dataset_tag_for_runs(dataset, dataset_meta)
+
+    trades_path = walkforward_oos_trades_path(run_dir)
     if not trades_path.exists():
-        raise ValueError(f"missing oos_trades.csv under run dir: {run_dir}")
+        raise ValueError(f"missing tables/oos_trades.csv under run dir: {run_dir}")
 
     if n_sims <= 0:
         raise ValueError("n_sims must be > 0")
@@ -229,7 +241,7 @@ def run_monte_carlo(
     if sim_trades <= 0:
         raise ValueError("n_trades must be > 0")
 
-    eq_path = run_dir / "oos_equity_curve.csv"
+    eq_path = walkforward_oos_equity_path(run_dir)
     historical_years = float("nan")
     if eq_path.exists():
         try:
@@ -285,14 +297,20 @@ def run_monte_carlo(
             )
 
     sims_df = pd.DataFrame(rows)
-    mc_run_dir = _make_mc_run_dir(run_dir)
-    sims_df.to_csv(mc_run_dir / "mc_simulations.csv", index=False)
+    mc_run_dir = make_montecarlo_run_dir(
+        base=_base_from_strategy_run_dir(run_dir),
+        strategy=strategy,
+        dataset_tag=dataset_tag,
+        parent_run_id=run_dir.name,
+    )
+    tables_dir(mc_run_dir).mkdir(parents=True, exist_ok=True)
+    sims_df.to_csv(montecarlo_simulations_path(mc_run_dir), index=False)
     if sample_paths:
         sp_rows = []
         for sim_id, p in sample_paths:
             for trade_n, equity in enumerate(p):
                 sp_rows.append({"sim": sim_id, "trade_n": int(trade_n), "equity": float(equity)})
-        pd.DataFrame(sp_rows).to_csv(mc_run_dir / "mc_paths_sample.csv", index=False)
+        pd.DataFrame(sp_rows).to_csv(montecarlo_sample_paths_path(mc_run_dir), index=False)
     if quantile_matrix is not None:
         qs = np.quantile(quantile_matrix, [0.05, 0.25, 0.50, 0.75, 0.95], axis=0)
         qdf = pd.DataFrame(
@@ -305,7 +323,7 @@ def run_monte_carlo(
                 "q95": qs[4, :],
             }
         )
-        qdf.to_csv(mc_run_dir / "mc_paths_quantiles.csv", index=False)
+        qdf.to_csv(montecarlo_quantile_paths_path(mc_run_dir), index=False)
 
     risk_of_ruin_pct = float(sims_df["ruin_hit"].mean() * 100.0)
     median_max_dd_pct = _finite_median(sims_df["max_drawdown_%"])
@@ -381,7 +399,26 @@ def run_monte_carlo(
         "thresholds": thresholds,
         "threshold_checks": checks,
     }
-    _write_json(mc_run_dir / "mc_summary.json", summary)
+    _write_json(
+        spec_path(mc_run_dir),
+        {
+            "parent_walkforward_run": str(run_dir),
+            "strategy": strategy,
+            "dataset": dataset,
+            "dataset_meta": dataset_meta,
+            "config": summary["config"],
+        },
+    )
+    _write_json(summary_path(mc_run_dir), summary)
+    write_manifest(
+        mc_run_dir,
+        workflow="monte_carlo",
+        strategy=strategy,
+        category=f"from_{run_dir.name}",
+        dataset_tag=dataset_tag,
+        parent_run_dir=run_dir,
+        extras={"parent_workflow": "walkforward"},
+    )
 
     print(
         "[MC] done "

@@ -132,4 +132,43 @@ STRATEGY = {
         "name": "fixed_risk",
         "params": {"risk_pct": 0.01},
     },
+    "limited_test": {
+        "entry": {
+            "optimizable": {
+                "fast": {
+                    "label": "Fast SMA",
+                    "default": 50,
+                    "start": 30,
+                    "stop": 70,
+                    "step": 20,
+                    "integer": True,
+                },
+                "slow": {
+                    "label": "Slow SMA",
+                    "default": 200,
+                    "start": 150,
+                    "stop": 250,
+                    "step": 50,
+                    "integer": True,
+                },
+            },
+            "non_optimizable": [],
+        },
+        "exit": {
+            "optimizable": {
+                "rr": {
+                    "label": "RR value(s)",
+                    "default": 2.0,
+                    "start": 1.5,
+                    "stop": 2.5,
+                    "step": 0.5,
+                    "integer": False,
+                },
+            },
+            "non_optimizable": [
+                "sldist_atr_mult",
+                "atr_period",
+            ],
+        },
+    },
 }

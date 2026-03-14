@@ -16,10 +16,11 @@ The code is organized under `src/quantbt` with runnable scripts under `scripts/`
 |---|---|
 | `src/quantbt/core` | Backtest engines and performance metrics |
 | `src/quantbt/plugins` | Plugin registry + entry/exit/sizing plugin implementations |
-| `src/quantbt/strategies` | Strategy modules (currently `sma_cross_test_strat`) |
+| `src/quantbt/strategies` | Strategy modules discovered dynamically by the UI/CLI |
 | `src/quantbt/io` | Data loading, dataset naming/version metadata, downloader integration |
 | `src/quantbt/optimisers` | Grid and Optuna optimization drivers |
 | `src/quantbt/experiments` | Run directory/index artifact helpers |
+| `src/quantbt/cli` | Package-backed CLI entrypoints used by console scripts and shim scripts |
 | `src/quantbt/experiments/limited` | Limited-test criteria and logging helpers |
 | `src/quantbt/experiments/walkforward` | Walk-forward split, fitness, and orchestration helpers |
 | `src/quantbt/experiments/montecarlo` | Monte Carlo trade-order simulation and risk metrics |
@@ -30,6 +31,7 @@ The code is organized under `src/quantbt` with runnable scripts under `scripts/`
 | `scripts/plot_oos_equity.py` | Interactive Plotly chart for walk-forward OOS equity/trades |
 | `scripts/run_monte_carlo.py` | CLI Monte Carlo simulator over OOS trade sequences |
 | `scripts/plot_monte_carlo.py` | Interactive Plotly chart for Monte Carlo distributions and paths |
+| `docs/workflows` | Workflow-specific operational docs (monkey testing, etc.) |
 | `runs/` | Output artifacts from optimization and limited tests |
 | `data/processed/` | Local generated datasets and metadata |
 
@@ -73,7 +75,7 @@ Central plugin registry.
 
 ### Entry plugins (`plugins/entries`)
 
-- `sma_cross.py`: delegates signal generation to `strategies/sma_cross_test_strat.py`.
+- `sma_cross.py`: delegates signal generation to `strategies/sma_cross_strategy.py`.
 - `donchian_breakout.py`: Donchian channel breakout entries.
 - `random_entry.py`:
   - `random` and `monkey_entry` plugin names.
@@ -99,7 +101,7 @@ Central plugin registry.
 
 ## Strategy Layer (`src/quantbt/strategies`)
 
-### `sma_cross_test_strat.py`
+### `sma_cross_strategy.py`
 Built-in SMA crossover strategy module.
 
 - `SMACrossTestStratParams` / `Params`

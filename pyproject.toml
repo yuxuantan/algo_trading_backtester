@@ -20,6 +20,13 @@ dependencies = [
   "dukascopy-python>=4.0.1",
 ]
 
+[project.scripts]
+quantbt-download-data = "quantbt.cli.download_data:main"
+quantbt-limited = "quantbt.cli.limited:main"
+quantbt-montecarlo = "quantbt.cli.montecarlo:main"
+quantbt-optimize = "quantbt.cli.optimize:main"
+quantbt-walkforward = "quantbt.cli.walkforward:main"
+
 [project.optional-dependencies]
 ui = [
   "streamlit>=1.30",

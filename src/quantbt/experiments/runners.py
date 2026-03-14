@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, is_dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from quantbt.artifacts import make_strategy_run_dir, spec_path, summary_path, tables_dir
 
 
 def _safe(s: Any) -> str:
@@ -30,22 +31,14 @@ def make_run_dir(
     variant: str | None = None,
     label: str | None = None,
 ) -> Path:
-    ts = datetime.now().strftime("%d%m%y_%H%M%S")
-    stem = f"run_{ts}_{_safe(label)}" if label else f"run_{ts}"
-
-    parent_dir = Path(base) / _safe(mode) / _safe(strategy) / _safe(dataset_tag)
-    if variant:
-        parent_dir = parent_dir / _safe(variant)
-    parent_dir.mkdir(parents=True, exist_ok=True)
-
-    run_dir = parent_dir / stem
-    suffix = 1
-    while run_dir.exists():
-        suffix += 1
-        run_dir = parent_dir / f"{stem}_{suffix:02d}"
-
-    run_dir.mkdir(parents=True, exist_ok=False)
-    return run_dir
+    category = variant or label or mode or "run"
+    return make_strategy_run_dir(
+        base=base,
+        strategy=strategy,
+        workflow=mode,
+        category=category,
+        dataset_tag=dataset_tag,
+    )
 
 
 def dump_json(path: Path, obj: Any) -> None:
@@ -65,15 +58,17 @@ def save_artifacts(
     summary: Any | None = None,
 ) -> None:
     if config is not None:
-        dump_json(run_dir / "config.json", config)
+        dump_json(spec_path(run_dir), config)
     if summary is not None:
-        dump_json(run_dir / "summary.json", summary)
+        dump_json(summary_path(run_dir), summary)
+    tdir = tables_dir(run_dir)
+    tdir.mkdir(parents=True, exist_ok=True)
     if results_df is not None:
-        results_df.to_csv(run_dir / "results.csv", index=False)
+        results_df.to_csv(tdir / "results.csv", index=False)
     if trades_df is not None:
-        trades_df.to_csv(run_dir / "best_trades.csv", index=False)
+        trades_df.to_csv(tdir / "best_trades.csv", index=False)
     if equity_df is not None:
-        equity_df.to_csv(run_dir / "best_equity_curve.csv")
+        equity_df.to_csv(tdir / "best_equity_curve.csv")
 
 
 def append_run_index(

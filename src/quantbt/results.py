@@ -7,6 +7,13 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from quantbt.artifacts import (
+    limited_iterations_path,
+    spec_path,
+    summary_path,
+    walkforward_folds_path,
+)
+
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -25,9 +32,9 @@ def load_limited_summary(run_dir: Path) -> Dict[str, Any]:
     Returns a dict with keys: decision, pass_threshold, min_trades, criteria, metrics, is_monkey, etc.
     """
 
-    results_path = run_dir / "limited_results.csv"
-    pass_path = run_dir / "pass_summary.json"
-    meta_path = run_dir / "run_meta.json"
+    results_path = limited_iterations_path(run_dir)
+    pass_path = summary_path(run_dir)
+    meta_path = spec_path(run_dir)
 
     if not (results_path.exists() and pass_path.exists() and meta_path.exists()):
         raise FileNotFoundError("Missing required limited run output files.")
@@ -92,13 +99,13 @@ def load_limited_summary(run_dir: Path) -> Dict[str, Any]:
 
 
 def load_walkforward_summary(run_dir: Path) -> Dict[str, Any]:
-    summary_path = run_dir / "summary.json"
-    folds_path = run_dir / "folds.csv"
+    wf_summary_path = summary_path(run_dir)
+    folds_path = walkforward_folds_path(run_dir)
 
-    if not (summary_path.exists() and folds_path.exists()):
+    if not (wf_summary_path.exists() and folds_path.exists()):
         raise FileNotFoundError("Missing walk-forward summary or folds file.")
 
-    summary = _read_json(summary_path)
+    summary = _read_json(wf_summary_path)
     folds = pd.read_csv(folds_path)
 
     segment_count = int(len(folds))
@@ -124,11 +131,11 @@ def load_walkforward_summary(run_dir: Path) -> Dict[str, Any]:
 
 
 def load_montecarlo_summary(run_dir: Path) -> Dict[str, Any]:
-    summary_path = run_dir / "mc_summary.json"
-    if not summary_path.exists():
+    mc_summary_path = summary_path(run_dir)
+    if not mc_summary_path.exists():
         raise FileNotFoundError("Missing Monte Carlo summary json.")
 
-    summary = _read_json(summary_path)
+    summary = _read_json(mc_summary_path)
     metrics = summary.get("metrics", {})
     thresholds = summary.get("thresholds", {})
     checks = summary.get("threshold_checks", {})

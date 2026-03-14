@@ -10,20 +10,44 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
 
 RUNS_ROOT = Path(__file__).resolve().parent.parent / "runs"
+STRATEGIES_ROOT = RUNS_ROOT / "strategies"
 
 
-def _sorted_run_dirs(path: Path) -> list[Path]:
-    if not path.exists():
-        return []
-    dirs = [p for p in path.iterdir() if p.is_dir()]
-    # sort by modification time (newest last)
-    dirs.sort(key=lambda p: p.stat().st_mtime)
-    return dirs
+def _discover_runs_by_workflow() -> dict[str, list[Path]]:
+    out: dict[str, list[Path]] = {}
+    if not STRATEGIES_ROOT.exists():
+        return out
+
+    for manifest in STRATEGIES_ROOT.rglob("manifest.json"):
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        workflow = str(payload.get("workflow", "")).strip().lower()
+        if not workflow:
+            continue
+        out.setdefault(workflow, []).append(manifest.parent)
+
+    for workflow, run_dirs in out.items():
+        run_dirs.sort(key=lambda p: p.stat().st_mtime)
+        out[workflow] = run_dirs
+    return out
+
+
+def _prune_empty_dirs(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        try:
+            next(path.iterdir())
+        except StopIteration:
+            path.rmdir()
 
 
 def clean_runs(keep_last: int | None = None, dry_run: bool = True) -> None:
@@ -37,14 +61,12 @@ def clean_runs(keep_last: int | None = None, dry_run: bool = True) -> None:
         dry_run: if True, only print what would be removed.
     """
 
-    if not RUNS_ROOT.exists():
+    if not STRATEGIES_ROOT.exists():
         print(f"No runs root found at {RUNS_ROOT}")
         return
 
-    for subfolder in RUNS_ROOT.iterdir():
-        if not subfolder.is_dir():
-            continue
-        dirs = _sorted_run_dirs(subfolder)
+    runs_by_workflow = _discover_runs_by_workflow()
+    for workflow, dirs in runs_by_workflow.items():
         if keep_last is None:
             # nothing to delete unless explicitly requested
             continue
@@ -58,6 +80,9 @@ def clean_runs(keep_last: int | None = None, dry_run: bool = True) -> None:
             print(f"Removing {d}")
             if not dry_run:
                 shutil.rmtree(d, ignore_errors=True)
+
+    if not dry_run:
+        _prune_empty_dirs(STRATEGIES_ROOT)
 
 
 def main() -> None:

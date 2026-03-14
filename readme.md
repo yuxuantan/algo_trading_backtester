@@ -3,6 +3,7 @@
 Modular backtesting and limited-testing framework for strategy validation.
 
 Detailed codebase documentation lives in `docs/CODEBASE.md`.
+Workflow notes live under `docs/workflows/`.
 
 ## 1. Setup
 
@@ -13,6 +14,14 @@ pip install -e .
 ```
 
 If you do not install editable, run scripts with `PYTHONPATH=src`.
+
+Installed console entrypoints are also available after package install:
+
+- `quantbt-download-data`
+- `quantbt-limited`
+- `quantbt-walkforward`
+- `quantbt-montecarlo`
+- `quantbt-optimize`
 
 ### 1.1 Streamlit Frontend (Optional)
 
@@ -141,7 +150,7 @@ All limited tests run through:
 
 Default strategy in this repo:
 
-- `quantbt.strategies.sma_cross_test_strat`
+- `quantbt.strategies.sma_cross_strategy`
 
 Shared dataset used in examples:
 
@@ -163,7 +172,7 @@ Command:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --commission-rt 5
 ```
@@ -182,7 +191,7 @@ Command:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin sma_cross \
   --entry-params '{"fast":[20,30,40,50,60,70,80],"slow":[125,150,175,200,225,250,275,300,325,350]}' \
@@ -205,7 +214,7 @@ Command:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin donchian_breakout \
   --entry-params '{"lookback":[20]}' \
@@ -232,7 +241,7 @@ Run core test, then read latest core result row:
 ```bash
 python3 - <<'PY'
 import glob, os, pandas as pd
-root = "runs/limited/sma_cross_test_strat/eurusd_1h_20100101_20130101/core_system_test__sma_cross__fixed_atr_exit"
+root = "runs/limited/sma_cross_strategy/eurusd_1h_20100101_20130101/core_system_test__sma_cross__fixed_atr_exit"
 latest = max(glob.glob(os.path.join(root, "run_*")), key=os.path.getmtime)
 row = pd.read_csv(os.path.join(latest, "limited_results.csv")).iloc[0]
 print("core_path:", latest)
@@ -255,7 +264,7 @@ Use:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin monkey_entry \
   --entry-params '{"target_entries":132,"side":"both","long_ratio":0.5}' \
@@ -286,7 +295,7 @@ Command:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --exit-plugin monkey_exit \
   --exit-params '{"avg_hold_bars":15.75}' \
@@ -310,7 +319,7 @@ Command:
 
 ```bash
 python3 scripts/run_limited_tests.py \
-  --strategy quantbt.strategies.sma_cross_test_strat \
+  --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin monkey_entry \
   --entry-params '{"target_entries":132,"side":"both","long_ratio":0.5}' \
@@ -358,7 +367,7 @@ Each run writes:
 
 ```bash
 python3 scripts/run_optimize.py \
-  --strategy sma_cross_test_strat \
+  --strategy sma_cross_strategy \
   --optimizer grid \
   --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --objective total_return_% \
@@ -389,7 +398,7 @@ Example (anchored WFA with grid optimization):
 
 ```bash
 python3 scripts/run_walkforward.py \
-  --strategy sma_cross_test_strat \
+  --strategy sma_cross_strategy \
   --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --optimizer grid \
   --objective return_on_account \
@@ -404,7 +413,7 @@ Example (unanchored WFA):
 
 ```bash
 python3 scripts/run_walkforward.py \
-  --strategy sma_cross_test_strat \
+  --strategy sma_cross_strategy \
   --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --unanchored \
   --is-bars 2000 \
@@ -416,7 +425,7 @@ Example (stability-first WFA optimization):
 
 ```bash
 python3 scripts/run_walkforward.py \
-  --strategy sma_cross_test_strat \
+  --strategy sma_cross_strategy \
   --dataset data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --optimizer grid \
   --optimization-mode stability_robustness \
@@ -443,7 +452,7 @@ Interactive OOS equity visualization:
 
 ```bash
 python3 scripts/plot_oos_equity.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss
+  --run-dir runs/walkforward/sma_cross_strategy/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss
 ```
 
 This writes:
@@ -467,7 +476,7 @@ Example:
 
 ```bash
 python3 scripts/run_monte_carlo.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss \
+  --run-dir runs/walkforward/sma_cross_strategy/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss \
   --n-sims 8000 \
   --replace \
   --ruin-equity 70000 \
@@ -488,7 +497,7 @@ Interactive Monte Carlo visualization:
 
 ```bash
 python3 scripts/plot_monte_carlo.py \
-  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss/monte_carlo/run_ddmmyy_hhmmss
+  --mc-run-dir runs/walkforward/sma_cross_strategy/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss/monte_carlo/run_ddmmyy_hhmmss
 ```
 
 This writes:

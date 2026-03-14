@@ -28,7 +28,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-save-trades",
         action="store_true",
-        help="Do not collect/write limited_trades.csv (reduces memory usage on large runs).",
+        help="Do not collect/write tables/trades.csv (reduces memory usage on large runs).",
     )
     parser.add_argument("--commission-rt", type=float, default=None, help="Commission per round trip (USD per standard lot).")
     parser.add_argument("--spread-pips", type=float, default=None, help="Slippage/spread in pips.")

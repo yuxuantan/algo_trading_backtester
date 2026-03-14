@@ -8,7 +8,7 @@ from quantbt.core.engine import BacktestConfig
 from quantbt.plugins.registry import register_entry
 
 
-_STRAT_MODULE = "quantbt.strategies.InterEquity2026-03 LiqSweepB"
+_STRAT_MODULE = "quantbt.strategies.interequity_2026_03_liqsweep_b"
 _CACHED_BRACKETS: dict[tuple[pd.Timestamp, str], dict[str, float]] = {}
 
 

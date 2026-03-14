@@ -3,7 +3,7 @@ Interactive Plotly chart for Monte Carlo run outputs.
 
 Example:
 python3 scripts/plot_monte_carlo.py \
-  --mc-run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss/monte_carlo/run_ddmmyy_hhmmss
+  --mc-run-dir runs/strategies/sma_cross_strategy/monte_carlo/eurusd_1h/2010-01-01_2026-02-09/from_run_2026-03-14_15-40-57/run_2026-03-14_16-09-33
 """
 
 from __future__ import annotations
@@ -224,8 +224,8 @@ def build_figure(
 
 def main():
     parser = argparse.ArgumentParser("Plot interactive chart for Monte Carlo run.")
-    parser.add_argument("--mc-run-dir", required=True, help="Path to monte_carlo/run_x folder.")
-    parser.add_argument("--output", default=None, help="Output HTML path. Default: <mc-run-dir>/mc_interactive.html")
+    parser.add_argument("--mc-run-dir", required=True, help="Path to Monte Carlo run folder.")
+    parser.add_argument("--output", default=None, help="Output HTML path. Default: <mc-run-dir>/plots/interactive.html")
     parser.add_argument("--title", default=None, help="Chart title.")
     parser.add_argument("--max-sample-lines", type=int, default=40)
     parser.add_argument("--show", action="store_true", help="Open interactive window after writing HTML.")
@@ -235,13 +235,13 @@ def main():
         raise SystemExit("plotly is not installed. Install it with: pip install plotly")
 
     mc_dir = Path(args.mc_run_dir)
-    sims_path = mc_dir / "mc_simulations.csv"
-    summary_path = mc_dir / "mc_summary.json"
-    sample_path = mc_dir / "mc_paths_sample.csv"
-    quantiles_path = mc_dir / "mc_paths_quantiles.csv"
+    sims_path = mc_dir / "tables" / "simulations.csv"
+    summary_path = mc_dir / "summary.json"
+    sample_path = mc_dir / "tables" / "sample_paths.csv"
+    quantiles_path = mc_dir / "tables" / "quantile_paths.csv"
 
     if not sims_path.exists():
-        raise ValueError(f"missing mc_simulations.csv in {mc_dir}")
+        raise ValueError(f"missing tables/simulations.csv in {mc_dir}")
 
     sims_df = pd.read_csv(sims_path)
     summary = _read_json(summary_path)
@@ -258,7 +258,8 @@ def main():
         title=title,
     )
 
-    output = Path(args.output) if args.output else mc_dir / "mc_interactive.html"
+    output = Path(args.output) if args.output else mc_dir / "plots" / "interactive.html"
+    output.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(output, include_plotlyjs="cdn", full_html=True)
     print(f"Saved interactive chart: {output}")
     if args.show:

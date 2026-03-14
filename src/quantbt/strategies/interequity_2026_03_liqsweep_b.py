@@ -17,28 +17,20 @@ ST_RED = 2
 
 
 @dataclass(frozen=True)
-class InterEquityLiqSweepParams:
-    # Core tuning knobs (keep this list small to reduce data-snooping risk).
-    # - htf: market-structure granularity
-    # - atr_dist_for_liq_generation: equal-high/low proximity tolerance
-    # - liq_move_away_atr: confirmation strictness
-    # - max_rr: upper reward:risk gate
-    max_rr: float = 5.0
+class InterEquityLiqSweepBParams:
+    # Core tuning knobs (keep this list compact to reduce data-snooping risk).
+    max_rr: float = 10.0
+    min_rr: float = 1.0
     atr_dist_for_liq_generation: float = 1.0
     liq_move_away_atr: float = 3.0
-    htf: str = "30"
 
-    # Kept mostly fixed (not part of default optimizer grid).
-    min_rr: float = 1.0
+    # Structure/runtime defaults.
     show_ltf: bool = True
-    show_htf: bool = True
-
-    # Structural constants
-    ltf_pivot_len: int = 3
-    htf_pivot_len: int = 3
+    ltf_pivot_len: int = 7
     atr_len: int = 14
     risk_pct: float = 0.01
-    sl_buffer_pips: float = 0.2
+    sl_atr_buffer_mult: float = 0.1
+    max_stop_atr: float = 10.0
 
     # Instrument config
     pip_size: float = 0.0001
@@ -47,32 +39,25 @@ class InterEquityLiqSweepParams:
     # Runtime caps
     max_ltf_h: int = 150
     max_ltf_l: int = 150
-    max_htf_h: int = 100
-    max_htf_l: int = 100
 
     def __post_init__(self):
         object.__setattr__(self, "min_rr", float(self.min_rr))
         object.__setattr__(self, "max_rr", float(self.max_rr))
         object.__setattr__(self, "atr_dist_for_liq_generation", float(self.atr_dist_for_liq_generation))
-
-        object.__setattr__(self, "htf", str(self.htf))
         object.__setattr__(self, "show_ltf", bool(self.show_ltf))
-        object.__setattr__(self, "show_htf", bool(self.show_htf))
 
         object.__setattr__(self, "ltf_pivot_len", int(self.ltf_pivot_len))
-        object.__setattr__(self, "htf_pivot_len", int(self.htf_pivot_len))
         object.__setattr__(self, "atr_len", int(self.atr_len))
         object.__setattr__(self, "risk_pct", float(self.risk_pct))
-        object.__setattr__(self, "sl_buffer_pips", float(self.sl_buffer_pips))
         object.__setattr__(self, "liq_move_away_atr", float(self.liq_move_away_atr))
+        object.__setattr__(self, "sl_atr_buffer_mult", float(self.sl_atr_buffer_mult))
+        object.__setattr__(self, "max_stop_atr", float(self.max_stop_atr))
 
         object.__setattr__(self, "pip_size", float(self.pip_size))
         object.__setattr__(self, "min_tick", float(self.min_tick))
 
         object.__setattr__(self, "max_ltf_h", int(self.max_ltf_h))
         object.__setattr__(self, "max_ltf_l", int(self.max_ltf_l))
-        object.__setattr__(self, "max_htf_h", int(self.max_htf_h))
-        object.__setattr__(self, "max_htf_l", int(self.max_htf_l))
 
         if self.min_rr < 0 or self.max_rr < 0:
             raise ValueError("min_rr/max_rr must be >= 0")
@@ -82,17 +67,21 @@ class InterEquityLiqSweepParams:
             raise ValueError("atr_dist_for_liq_generation must be >= 0")
         if self.liq_move_away_atr <= 0:
             raise ValueError("liq_move_away_atr must be > 0")
-        if self.ltf_pivot_len <= 0 or self.htf_pivot_len <= 0:
-            raise ValueError("ltf_pivot_len and htf_pivot_len must be > 0")
+        if self.ltf_pivot_len <= 0:
+            raise ValueError("ltf_pivot_len must be > 0")
         if self.atr_len <= 0:
             raise ValueError("atr_len must be > 0")
         if self.risk_pct <= 0:
             raise ValueError("risk_pct must be > 0")
+        if self.sl_atr_buffer_mult < 0:
+            raise ValueError("sl_atr_buffer_mult must be >= 0")
+        if self.max_stop_atr <= 0:
+            raise ValueError("max_stop_atr must be > 0")
         if self.pip_size <= 0 or self.min_tick <= 0:
             raise ValueError("pip_size and min_tick must be > 0")
 
 
-Params = InterEquityLiqSweepParams
+Params = InterEquityLiqSweepBParams
 
 
 @dataclass
@@ -159,25 +148,6 @@ class _LevelPool:
             else:
                 self.pend_a[k] = a - 1
                 self.pend_b[k] = b - 1
-
-
-def _timeframe_to_minutes(tf: str) -> int:
-    s = str(tf).strip().upper()
-    if s.isdigit():
-        return int(s)
-    if s in {"D", "1D"}:
-        return 1440
-    if s in {"W", "1W"}:
-        return 10080
-    if s.endswith("H"):
-        return int(s[:-1]) * 60
-    if s.endswith("MIN"):
-        return int(s[:-3])
-    raise ValueError(f"Unsupported HTF format: {tf!r}")
-
-
-def _bucket_floor(ts: pd.Timestamp, minutes: int) -> pd.Timestamp:
-    return ts.floor(f"{int(minutes)}min")
 
 
 def _true_range(high: float, low: float, prev_close: float | None) -> float:
@@ -507,15 +477,21 @@ def _ltf_sweep_triggers(
     *,
     event_time: pd.Timestamp,
     line_events: list[dict[str, Any]] | None = None,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, float | None, float | None]:
     trig_short = False
     trig_long = False
+    short_entry_level = math.nan
+    long_entry_level = math.nan
 
     # Deactivate all breached LTF high lines on the current bar.
     for i in range(len(ltf_h.lvls)):
         if ltf_h.drawn_act[i] and high_val > ltf_h.lvls[i]:
             if ltf_h.state[i] == ST_RED:
                 trig_short = True
+                lvl = float(ltf_h.lvls[i])
+                # If multiple red highs are swept on this bar, enter at the latest
+                # one taken out (highest swept level for upside sweep).
+                short_entry_level = lvl if math.isnan(short_entry_level) else max(short_entry_level, lvl)
             ltf_h.drawn_act[i] = False
             if line_events is not None:
                 line_events.append(
@@ -533,6 +509,10 @@ def _ltf_sweep_triggers(
         if ltf_l.drawn_act[i] and low_val < ltf_l.lvls[i]:
             if ltf_l.state[i] == ST_RED:
                 trig_long = True
+                lvl = float(ltf_l.lvls[i])
+                # If multiple red lows are swept on this bar, enter at the latest
+                # one taken out (lowest swept level for downside sweep).
+                long_entry_level = lvl if math.isnan(long_entry_level) else min(long_entry_level, lvl)
             ltf_l.drawn_act[i] = False
             if line_events is not None:
                 line_events.append(
@@ -545,79 +525,48 @@ def _ltf_sweep_triggers(
                     }
                 )
 
-    return trig_short, trig_long
+    return (
+        trig_short,
+        trig_long,
+        None if math.isnan(short_entry_level) else float(short_entry_level),
+        None if math.isnan(long_entry_level) else float(long_entry_level),
+    )
 
 
-def _next_htf_purple_high_above(price: float, htf_h: _LevelPool) -> float | None:
+def _next_purple_above(price: float, ltf_h: _LevelPool, ltf_l: _LevelPool) -> float | None:
     best = math.nan
-    for i, lvl in enumerate(htf_h.lvls):
-        if htf_h.drawn_act[i] and htf_h.state[i] == ST_PURPLE and lvl > price:
-            best = lvl if math.isnan(best) else min(best, lvl)
+    for pool in (ltf_h, ltf_l):
+        for i, lvl in enumerate(pool.lvls):
+            if pool.drawn_act[i] and pool.state[i] == ST_PURPLE and lvl > price:
+                best = lvl if math.isnan(best) else min(best, lvl)
     return None if math.isnan(best) else float(best)
 
 
-def _next_htf_purple_low_below(price: float, htf_l: _LevelPool) -> float | None:
+def _next_purple_below(price: float, ltf_h: _LevelPool, ltf_l: _LevelPool) -> float | None:
     best = math.nan
-    for i, lvl in enumerate(htf_l.lvls):
-        if htf_l.drawn_act[i] and htf_l.state[i] == ST_PURPLE and lvl < price:
-            best = lvl if math.isnan(best) else max(best, lvl)
+    for pool in (ltf_h, ltf_l):
+        for i, lvl in enumerate(pool.lvls):
+            if pool.drawn_act[i] and pool.state[i] == ST_PURPLE and lvl < price:
+                best = lvl if math.isnan(best) else max(best, lvl)
     return None if math.isnan(best) else float(best)
 
 
-def _next_htf_red_above(price: float, htf_h: _LevelPool, htf_l: _LevelPool) -> float | None:
+def _next_red_above(price: float, ltf_h: _LevelPool, ltf_l: _LevelPool) -> float | None:
     best = math.nan
-    for pool in (htf_h, htf_l):
+    for pool in (ltf_h, ltf_l):
         for i, lvl in enumerate(pool.lvls):
             if pool.drawn_act[i] and pool.state[i] == ST_RED and lvl > price:
                 best = lvl if math.isnan(best) else min(best, lvl)
     return None if math.isnan(best) else float(best)
 
 
-def _next_htf_red_below(price: float, htf_h: _LevelPool, htf_l: _LevelPool) -> float | None:
+def _next_red_below(price: float, ltf_h: _LevelPool, ltf_l: _LevelPool) -> float | None:
     best = math.nan
-    for pool in (htf_h, htf_l):
+    for pool in (ltf_h, ltf_l):
         for i, lvl in enumerate(pool.lvls):
             if pool.drawn_act[i] and pool.state[i] == ST_RED and lvl < price:
                 best = lvl if math.isnan(best) else max(best, lvl)
     return None if math.isnan(best) else float(best)
-
-
-def _next_state_above_non_black(
-    price: float,
-    ltf_h: _LevelPool,
-    ltf_l: _LevelPool,
-    htf_h: _LevelPool,
-    htf_l: _LevelPool,
-) -> int:
-    best_lvl = math.nan
-    best_state = -1
-    for pool in (ltf_h, ltf_l, htf_h, htf_l):
-        for i, lvl in enumerate(pool.lvls):
-            st = pool.state[i]
-            if pool.drawn_act[i] and st != ST_BLACK and lvl > price:
-                if math.isnan(best_lvl) or lvl < best_lvl:
-                    best_lvl = lvl
-                    best_state = st
-    return best_state
-
-
-def _next_state_below_non_black(
-    price: float,
-    ltf_h: _LevelPool,
-    ltf_l: _LevelPool,
-    htf_h: _LevelPool,
-    htf_l: _LevelPool,
-) -> int:
-    best_lvl = math.nan
-    best_state = -1
-    for pool in (ltf_h, ltf_l, htf_h, htf_l):
-        for i, lvl in enumerate(pool.lvls):
-            st = pool.state[i]
-            if pool.drawn_act[i] and st != ST_BLACK and lvl < price:
-                if math.isnan(best_lvl) or lvl > best_lvl:
-                    best_lvl = lvl
-                    best_state = st
-    return best_state
 
 
 def _any_red_between(
@@ -625,19 +574,17 @@ def _any_red_between(
     p2: float,
     ltf_h: _LevelPool,
     ltf_l: _LevelPool,
-    htf_h: _LevelPool,
-    htf_l: _LevelPool,
 ) -> bool:
     lo = min(p1, p2)
     hi = max(p1, p2)
-    for pool in (ltf_h, ltf_l, htf_h, htf_l):
+    for pool in (ltf_h, ltf_l):
         for i, lvl in enumerate(pool.lvls):
             if pool.drawn_act[i] and pool.state[i] == ST_RED and lo < lvl < hi:
                 return True
     return False
 
 
-def compute_features(df: pd.DataFrame, p: InterEquityLiqSweepParams) -> pd.DataFrame:
+def compute_features(df: pd.DataFrame, p: InterEquityLiqSweepBParams) -> pd.DataFrame:
     out = df.copy().sort_index()
     for c in ("open", "high", "low", "close"):
         if c not in out.columns:
@@ -660,10 +607,10 @@ def build_brackets_from_signal(
     entry_open: float,
     prev_low: float,
     prev_high: float,
-    p: InterEquityLiqSweepParams,
+    p: InterEquityLiqSweepBParams,
 ):
     # Fallback bracket builder for compatibility with generic engine.
-    sl_buffer = float(p.sl_buffer_pips) * float(p.pip_size)
+    sl_buffer = 0.0
     rr = max(float(p.min_rr), 0.1)
 
     if side == "long":
@@ -736,7 +683,7 @@ def _close_position(
 def run_backtest(
     df_sig: pd.DataFrame,
     *,
-    strategy_params: InterEquityLiqSweepParams,
+    strategy_params: InterEquityLiqSweepBParams,
     cfg: BacktestConfig = BacktestConfig(),
     debug: dict[str, Any] | None = None,
 ):
@@ -749,14 +696,10 @@ def run_backtest(
     trades: list[dict[str, Any]] = []
 
     pos: dict[str, Any] | None = None
-    pending_entry: dict[str, Any] | None = None
-    pending_market_exit: dict[str, Any] | None = None
     line_events: list[dict[str, Any]] = []
 
     ltf_h = _LevelPool(max_size=p.max_ltf_h)
     ltf_l = _LevelPool(max_size=p.max_ltf_l)
-    htf_h = _LevelPool(max_size=p.max_htf_h)
-    htf_l = _LevelPool(max_size=p.max_htf_l)
 
     ltf_high_hist: list[float] = []
     ltf_low_hist: list[float] = []
@@ -764,57 +707,13 @@ def run_backtest(
     ltf_time_hist: list[pd.Timestamp] = []
     ltf_atr_hist: list[float] = []
 
-    htf_high_hist: list[float] = []
-    htf_low_hist: list[float] = []
-    htf_close_hist: list[float] = []
-    htf_time_hist: list[pd.Timestamp] = []
-    htf_atr_hist: list[float] = []
-
     ltf_prev_close: float | None = None
     ltf_prev_atr: float | None = None
 
-    htf_prev_close: float | None = None
-    htf_prev_atr: float | None = None
-
-    htf_minutes = _timeframe_to_minutes(p.htf)
-    curr_bucket: pd.Timestamp | None = None
-    htf_open = math.nan
-    htf_high = math.nan
-    htf_low = math.nan
-    htf_close = math.nan
-
     for i, t in enumerate(idx):
-        o = float(df.at[t, "open"])
         h = float(df.at[t, "high"])
         l = float(df.at[t, "low"])
         c = float(df.at[t, "close"])
-
-        # ---- Execute delayed market close at next bar open ----
-        if pos is not None and pending_market_exit is not None and int(pending_market_exit["entry_i"]) == i:
-            equity, trade = _close_position(
-                pos=pos,
-                exit_price=o,
-                exit_time=t,
-                exit_reason=str(pending_market_exit["reason"]),
-                equity=equity,
-                cfg=cfg,
-            )
-            trades.append(trade)
-            pos = None
-            pending_market_exit = None
-
-        # ---- Fill delayed entry at next bar open ----
-        if pos is None and pending_entry is not None and int(pending_entry["entry_i"]) == i:
-            pos = {
-                "side": pending_entry["side"],
-                "entry": o,
-                "sl": float(pending_entry["sl"]),
-                "tp": float(pending_entry["tp"]),
-                "units": float(pending_entry["qty"]),
-                "entry_time": t,
-                "risk_dollars": float(pending_entry["risk_dollars"]),
-            }
-            pending_entry = None
 
         # ---- Manage open position via intrabar SL/TP ----
         if pos is not None:
@@ -857,7 +756,6 @@ def run_backtest(
                 )
                 trades.append(trade)
                 pos = None
-                pending_market_exit = None
 
         equity_curve.append({"time": t, "equity": equity})
 
@@ -887,6 +785,8 @@ def run_backtest(
 
         trig_short = False
         trig_long = False
+        trig_short_entry_px: float | None = None
+        trig_long_entry_px: float | None = None
 
         if p.show_ltf:
             _track_breach_high(ltf_h, h, t)
@@ -933,7 +833,7 @@ def run_backtest(
                 line_events=line_events,
             )
 
-            trig_short, trig_long = _ltf_sweep_triggers(
+            trig_short, trig_long, trig_short_entry_px, trig_long_entry_px = _ltf_sweep_triggers(
                 ltf_h,
                 ltf_l,
                 h,
@@ -942,198 +842,83 @@ def run_backtest(
                 line_events=line_events,
             )
 
-        # ---- HTF aggregation + state machine ----
-        bucket = _bucket_floor(t, htf_minutes)
-        if curr_bucket is None:
-            curr_bucket = bucket
-            htf_open = o
-            htf_high = h
-            htf_low = l
-            htf_close = c
-        elif bucket == curr_bucket:
-            htf_high = max(htf_high, h)
-            htf_low = min(htf_low, l)
-            htf_close = c
-        else:
-            fin_time = curr_bucket
-            fin_high = float(htf_high)
-            fin_low = float(htf_low)
-            fin_close = float(htf_close)
+        # ---- Strategy entries (immediate fill at swept-liquidity level) ----
+        if pos is None:
+            atr_ref = float(ltf_atr)
+            rr_band_valid = p.max_rr >= p.min_rr
+            if math.isfinite(atr_ref) and atr_ref > 0 and rr_band_valid:
+                sl_buffer = float(p.sl_atr_buffer_mult) * atr_ref
+                max_stop_dist = float(p.max_stop_atr) * atr_ref
 
-            tr_htf = _true_range(fin_high, fin_low, htf_prev_close)
-            htf_atr = tr_htf if htf_prev_atr is None else ((htf_prev_atr * (p.atr_len - 1)) + tr_htf) / p.atr_len
-            htf_prev_close = fin_close
-            htf_prev_atr = htf_atr
+                if trig_short and trig_short_entry_px is not None:
+                    entry_px = float(trig_short_entry_px)
+                    sl_raw = _next_purple_above(entry_px, ltf_h, ltf_l)
+                    sl = (sl_raw + sl_buffer) if sl_raw is not None else None
+                    tp = _next_red_below(entry_px, ltf_h, ltf_l)
 
-            htf_high_hist.append(fin_high)
-            htf_low_hist.append(fin_low)
-            htf_close_hist.append(fin_close)
-            htf_time_hist.append(fin_time)
-            htf_atr_hist.append(float(htf_atr))
+                    ok_sl = sl is not None and sl > entry_px
+                    ok_tp = tp is not None and tp < entry_px
 
-            htf_ph = None
-            htf_pl = None
-            htf_pivot_time = None
-            htf_pivot_atr = None
-
-            hc_idx = len(htf_high_hist) - 1 - p.htf_pivot_len
-            if hc_idx >= p.htf_pivot_len:
-                htf_ph = _pivot_high(htf_high_hist, hc_idx, p.htf_pivot_len, p.htf_pivot_len)
-                htf_pl = _pivot_low(htf_low_hist, hc_idx, p.htf_pivot_len, p.htf_pivot_len)
-                htf_pivot_time = htf_time_hist[hc_idx]
-                htf_pivot_atr = float(htf_atr_hist[hc_idx])
-
-            if p.show_htf:
-                _track_breach_high(htf_h, fin_high, fin_time)
-                _track_breach_low(htf_l, fin_low, fin_time)
-
-                if htf_ph is not None and htf_pivot_time is not None and htf_pivot_atr is not None:
-                    _append_high_pivot(
-                        pool=htf_h,
-                        pool_name="htf_h",
-                        pivot_value=float(htf_ph),
-                        pivot_time=htf_pivot_time,
-                        event_time=fin_time,
-                        pivot_atr=float(htf_pivot_atr),
-                        atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
-                        liq_move_away_atr=p.liq_move_away_atr,
-                        line_events=line_events,
+                    risk_dist = (sl - entry_px) if ok_sl else math.nan
+                    reward_dist = (entry_px - tp) if ok_tp and tp is not None else math.nan
+                    rr = (
+                        reward_dist / risk_dist
+                        if (math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist))
+                        else math.nan
                     )
+                    ok_rr = math.isfinite(rr) and rr >= p.min_rr and rr <= p.max_rr
+                    stop_not_too_wide = math.isfinite(risk_dist) and risk_dist < max_stop_dist
+                    has_red_between = bool(ok_sl and _any_red_between(entry_px, float(sl), ltf_h, ltf_l))
 
-                if htf_pl is not None and htf_pivot_time is not None and htf_pivot_atr is not None:
-                    _append_low_pivot(
-                        pool=htf_l,
-                        pool_name="htf_l",
-                        pivot_value=float(htf_pl),
-                        pivot_time=htf_pivot_time,
-                        event_time=fin_time,
-                        pivot_atr=float(htf_pivot_atr),
-                        atr_dist_for_liq_generation=p.atr_dist_for_liq_generation,
-                        liq_move_away_atr=p.liq_move_away_atr,
-                        line_events=line_events,
+                    if ok_sl and ok_tp and ok_rr and stop_not_too_wide and not has_red_between and sl is not None and tp is not None:
+                        risk_amount = float(cfg.initial_equity) * p.risk_pct
+                        stop_dist = max(sl - entry_px, p.min_tick)
+                        qty = risk_amount / stop_dist
+                        if math.isfinite(qty) and qty > 0:
+                            pos = {
+                                "side": "short",
+                                "entry": entry_px,
+                                "sl": float(sl),
+                                "tp": float(tp),
+                                "units": float(qty),
+                                "entry_time": t,
+                                "risk_dollars": float(risk_amount),
+                            }
+
+                if pos is None and trig_long and trig_long_entry_px is not None:
+                    entry_px = float(trig_long_entry_px)
+                    sl_raw = _next_purple_below(entry_px, ltf_h, ltf_l)
+                    sl = (sl_raw - sl_buffer) if sl_raw is not None else None
+                    tp = _next_red_above(entry_px, ltf_h, ltf_l)
+
+                    ok_sl = sl is not None and sl < entry_px
+                    ok_tp = tp is not None and tp > entry_px
+
+                    risk_dist = (entry_px - sl) if ok_sl else math.nan
+                    reward_dist = (tp - entry_px) if ok_tp and tp is not None else math.nan
+                    rr = (
+                        reward_dist / risk_dist
+                        if (math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist))
+                        else math.nan
                     )
+                    ok_rr = math.isfinite(rr) and rr >= p.min_rr and rr <= p.max_rr
+                    stop_not_too_wide = math.isfinite(risk_dist) and risk_dist < max_stop_dist
+                    has_red_between = bool(ok_sl and _any_red_between(entry_px, float(sl), ltf_h, ltf_l))
 
-                _confirm_move_away_high(
-                    htf_h,
-                    fin_close,
-                    pool_name="htf_h",
-                    event_time=fin_time,
-                    line_events=line_events,
-                )
-                _confirm_move_away_low(
-                    htf_l,
-                    fin_close,
-                    pool_name="htf_l",
-                    event_time=fin_time,
-                    line_events=line_events,
-                )
-
-            curr_bucket = bucket
-            htf_open = o
-            htf_high = h
-            htf_low = l
-            htf_close = c
-
-        if p.show_htf:
-            _stop_extending_high(
-                htf_h,
-                h,
-                pool_name="htf_h",
-                event_time=t,
-                line_events=line_events,
-            )
-            _stop_extending_low(
-                htf_l,
-                l,
-                pool_name="htf_l",
-                event_time=t,
-                line_events=line_events,
-            )
-
-        # ---- Strategy entries (signal bar -> enter next bar open) ----
-        flat = pos is None
-        entry_px = c
-        rr_band_valid = p.max_rr > p.min_rr
-        sl_buffer = p.sl_buffer_pips * p.pip_size
-
-        if flat and trig_short and i < len(df) - 1:
-            sl_raw = _next_htf_purple_high_above(entry_px, htf_h)
-            sl = (sl_raw + sl_buffer) if sl_raw is not None else None
-            tp = _next_htf_red_below(entry_px, htf_h, htf_l)
-
-            ok_sl = sl is not None and sl > entry_px
-            ok_tp = tp is not None and tp < entry_px
-
-            risk_dist = (sl - entry_px) if ok_sl else math.nan
-            reward_dist = (entry_px - tp) if ok_tp and tp is not None else math.nan
-            rr = (reward_dist / risk_dist) if (math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist)) else math.nan
-            ok_rr = rr_band_valid and math.isfinite(rr) and rr > p.min_rr and rr <= p.max_rr
-
-            has_red_between = True
-            if ok_sl and sl is not None:
-                has_red_between = _any_red_between(entry_px, sl, ltf_h, ltf_l, htf_h, htf_l)
-
-            if ok_sl and ok_tp and ok_rr and not has_red_between and sl is not None and tp is not None:
-                risk_amount = float(cfg.initial_equity) * p.risk_pct
-                stop_dist = max(sl - entry_px, p.min_tick)
-                qty = risk_amount / stop_dist
-                if math.isfinite(qty) and qty > 0:
-                    pending_entry = {
-                        "entry_i": i + 1,
-                        "side": "short",
-                        "qty": float(qty),
-                        "sl": float(sl),
-                        "tp": float(tp),
-                        "risk_dollars": float(risk_amount),
-                    }
-
-        if flat and trig_long and i < len(df) - 1:
-            sl_raw = _next_htf_purple_low_below(entry_px, htf_l)
-            sl = (sl_raw - sl_buffer) if sl_raw is not None else None
-            tp = _next_htf_red_above(entry_px, htf_h, htf_l)
-
-            ok_sl = sl is not None and sl < entry_px
-            ok_tp = tp is not None and tp > entry_px
-
-            risk_dist = (entry_px - sl) if ok_sl else math.nan
-            reward_dist = (tp - entry_px) if ok_tp and tp is not None else math.nan
-            rr = (reward_dist / risk_dist) if (math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist)) else math.nan
-            ok_rr = rr_band_valid and math.isfinite(rr) and rr > p.min_rr and rr <= p.max_rr
-
-            has_red_between = True
-            if ok_sl and sl is not None:
-                has_red_between = _any_red_between(entry_px, sl, ltf_h, ltf_l, htf_h, htf_l)
-
-            if ok_sl and ok_tp and ok_rr and not has_red_between and sl is not None and tp is not None:
-                risk_amount = float(cfg.initial_equity) * p.risk_pct
-                stop_dist = max(entry_px - sl, p.min_tick)
-                qty = risk_amount / stop_dist
-                if math.isfinite(qty) and qty > 0:
-                    pending_entry = {
-                        "entry_i": i + 1,
-                        "side": "long",
-                        "qty": float(qty),
-                        "sl": float(sl),
-                        "tp": float(tp),
-                        "risk_dollars": float(risk_amount),
-                    }
-
-        # ---- Directional force-exit: ignore black lines ----
-        if pos is not None and pending_market_exit is None and i < len(df) - 1:
-            if str(pos["side"]) == "long":
-                next_state = _next_state_above_non_black(entry_px, ltf_h, ltf_l, htf_h, htf_l)
-                if next_state == ST_PURPLE:
-                    pending_market_exit = {
-                        "entry_i": i + 1,
-                        "reason": "Nearest above is purple",
-                    }
-            else:
-                next_state = _next_state_below_non_black(entry_px, ltf_h, ltf_l, htf_h, htf_l)
-                if next_state == ST_PURPLE:
-                    pending_market_exit = {
-                        "entry_i": i + 1,
-                        "reason": "Nearest below is purple",
-                    }
+                    if ok_sl and ok_tp and ok_rr and stop_not_too_wide and not has_red_between and sl is not None and tp is not None:
+                        risk_amount = float(cfg.initial_equity) * p.risk_pct
+                        stop_dist = max(entry_px - sl, p.min_tick)
+                        qty = risk_amount / stop_dist
+                        if math.isfinite(qty) and qty > 0:
+                            pos = {
+                                "side": "long",
+                                "entry": entry_px,
+                                "sl": float(sl),
+                                "tp": float(tp),
+                                "units": float(qty),
+                                "entry_time": t,
+                                "risk_dollars": float(risk_amount),
+                            }
 
     equity_df = pd.DataFrame(equity_curve).set_index("time") if equity_curve else pd.DataFrame(columns=["equity"])
     trades_df = pd.DataFrame(trades)
@@ -1175,11 +960,13 @@ def run_backtest(
 
 
 PARAM_SPACE = {
-    # Deliberately compact search space to balance robustness vs overfitting.
-    "htf": ["30", "60"],
+    # Compact by design to keep optimization robust.
     "atr_dist_for_liq_generation": [0.8, 1.0, 1.2],
-    "liq_move_away_atr": [2.5, 3.0],
-    "max_rr": [4.0, 6.0, 8.0],
+    "liq_move_away_atr": [2.0, 2.5, 3.0],
+    "max_rr": [6.0, 8.0, 10.0],
+    "sl_atr_buffer_mult": [0.1],
+    "max_stop_atr": [10.0],
+    "ltf_pivot_len": [7],
 }
 
 
@@ -1194,23 +981,61 @@ STRATEGY = {
         "mode": "all",
         "rules": [
             {
-                "name": "interequity_liqsweep_entry",
+                "name": "interequity_liqsweepb_entry",
                 "params": {
                     "min_rr": 1.0,
-                    "max_rr": 5.0,
+                    "max_rr": 10.0,
                     "atr_dist_for_liq_generation": 1.0,
-                    "liq_move_away_atr": 3.0,
-                    "htf": "30",
+                    "liq_move_away_atr": 2.5,
+                    "ltf_pivot_len": 7,
+                    "sl_atr_buffer_mult": 0.1,
+                    "max_stop_atr": 10.0,
                 },
             }
         ],
     },
     "exit": {
-        "name": "interequity_liqsweep_exit",
-        "params": {"min_rr": 1.0, "sl_buffer_pips": 0.2, "pip_size": 0.0001},
+        "name": "interequity_liqsweepb_exit",
+        "params": {"min_rr": 1.0, "pip_size": 0.0001},
     },
     "sizing": {
         "name": "fixed_risk",
         "params": {"risk_pct": 0.01},
+    },
+    "limited_test": {
+        "entry": {
+            "optimizable": {
+                "atr_dist_for_liq_generation": {
+                    "label": "ATR distance for liquidity generation",
+                    "default": 1.0,
+                    "start": 0.4,
+                    "stop": 2.2,
+                    "step": 0.2,
+                    "integer": False,
+                },
+                "liq_move_away_atr": {
+                    "label": "Liquidity move-away ATR",
+                    "default": 2.5,
+                    "start": 1.0,
+                    "stop": 5.5,
+                    "step": 0.5,
+                    "integer": False,
+                },
+            },
+            "non_optimizable": [
+                "min_rr",
+                "max_rr",
+                "ltf_pivot_len",
+                "sl_atr_buffer_mult",
+                "max_stop_atr",
+            ],
+        },
+        "exit": {
+            "optimizable": {},
+            "non_optimizable": [
+                "min_rr",
+                "pip_size",
+            ],
+        },
     },
 }

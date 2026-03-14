@@ -9,6 +9,15 @@ from pathlib import Path
 
 import pandas as pd
 
+from quantbt.artifacts import (
+    infer_limited_scenario_slug,
+    limited_iterations_path,
+    limited_trades_path,
+    spec_path,
+    summary_path,
+    tables_dir,
+    write_manifest,
+)
 from quantbt.core.engine import BacktestConfig
 from quantbt.core.engine_limited import run_backtest_limited
 from quantbt.io.datasets import read_dataset_meta, dataset_tag_for_runs
@@ -106,13 +115,21 @@ def run_spec(spec: dict, *, progress_every: int = 10):
 
     dataset_meta = read_dataset_meta(data_path)
     dataset_tag = dataset_tag_for_runs(data_path, dataset_meta)
+    strategy_tag = spec.get("test", {}).get("strategy_tag", entry_spec.get("tag", "spec"))
+    scenario_slug = infer_limited_scenario_slug(
+        strat,
+        test_focus=str(spec.get("test", {}).get("test_focus", "")).strip(),
+        test_name=str(spec.get("test", {}).get("test_name", "limited_test")),
+    )
 
     run_dir = make_limited_run_dir(
-        base=spec.get("test", {}).get("run_base", "runs/limited"),
-        strategy=spec.get("test", {}).get("strategy_tag", entry_spec.get("tag", "spec")),
+        base=spec.get("test", {}).get("run_base", "runs"),
+        strategy=strategy_tag,
         dataset_tag=dataset_tag,
         test_name=spec.get("test", {}).get("test_name", "limited_test"),
+        scenario_slug=scenario_slug,
     )
+    tables_dir(run_dir).mkdir(parents=True, exist_ok=True)
 
     run_meta = {
         "spec": spec,
@@ -123,7 +140,18 @@ def run_spec(spec: dict, *, progress_every: int = 10):
     }
     if monkey_davey_enabled:
         run_meta["monkey_davey"] = monkey_davey_cfg
-    write_json(run_dir / "run_meta.json", run_meta)
+    write_json(spec_path(run_dir), run_meta)
+    write_manifest(
+        run_dir,
+        workflow="limited",
+        strategy=strategy_tag,
+        category=scenario_slug,
+        dataset_tag=dataset_tag,
+        extras={
+            "scenario_label": str(spec.get("test", {}).get("test_name", "limited_test")),
+            "test_focus": str(spec.get("test", {}).get("test_focus", "")),
+        },
+    )
 
     requires_atr = bool(getattr(exit_plugin, "requires_atr", False))
     atr_period = int(exit_spec.get("params", {}).get("atr_period", 14))
@@ -208,7 +236,7 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             flush=True,
         )
     if not save_trades:
-        print("[INFO] limited_trades.csv disabled (--no-save-trades).", flush=True)
+        print("[INFO] tables/trades.csv disabled (--no-save-trades).", flush=True)
 
     def size_fn(**kwargs):
         return sizing_plugin(**kwargs, params=sizing_params)
@@ -428,10 +456,10 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             break
 
     res_df = pd.DataFrame(rows)
-    res_df.to_csv(run_dir / "limited_results.csv", index=False)
+    res_df.to_csv(limited_iterations_path(run_dir), index=False)
     if trade_rows:
         trades_df = pd.concat(trade_rows, ignore_index=True)
-        trades_df.to_csv(run_dir / "limited_trades.csv", index=False)
+        trades_df.to_csv(limited_trades_path(run_dir), index=False)
 
     pass_rate = limited_test_pass_rate(res_df)
     davey_return_worse_pct = (
@@ -488,7 +516,7 @@ def run_spec(spec: dict, *, progress_every: int = 10):
                 else None
             ),
         }
-    write_json(run_dir / "pass_summary.json", pass_summary)
+    write_json(summary_path(run_dir), pass_summary)
 
     if monkey_prefilter_cfg is not None:
         accepted = int(len(res_df))
@@ -513,6 +541,6 @@ def run_spec(spec: dict, *, progress_every: int = 10):
         )
     print(f"Favourable%: {pass_rate:.1f}% -> {'PASS' if pass_decision else 'FAIL'}")
     print(f"Overall Result: {'PASS' if bool(pass_summary.get('passed', False)) else 'FAIL'}")
-    print(f"Saved: {run_dir}/limited_results.csv")
+    print(f"Saved: {limited_iterations_path(run_dir)}")
     if trade_rows:
-        print(f"Saved: {run_dir}/limited_trades.csv")
+        print(f"Saved: {limited_trades_path(run_dir)}")

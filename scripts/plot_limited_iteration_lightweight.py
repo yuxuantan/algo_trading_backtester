@@ -93,7 +93,7 @@ def _resolve_strategy_module(run_meta: dict[str, Any], explicit: str | None) -> 
             if not isinstance(rule, dict):
                 continue
             if str(rule.get("name", "")).strip() == "interequity_liqsweep_entry":
-                return "quantbt.strategies.InterEquity2026-02 LiqSweepA"
+                return "quantbt.strategies.interequity_2026_02_liqsweep_a"
 
     strategy_tag = str(test_cfg.get("strategy_tag", "")).strip()
     if strategy_tag:
@@ -1572,11 +1572,11 @@ def _build_html(payload: dict[str, Any]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser("Render limited iteration chart using TradingView lightweight-charts.")
     parser.add_argument("--run-dir", required=True, help="Path to limited run directory.")
-    parser.add_argument("--iter", required=True, type=int, help="Iteration id from limited_results.csv.")
+    parser.add_argument("--iter", required=True, type=int, help="Iteration id from tables/iterations.csv.")
     parser.add_argument(
         "--strategy-module",
         default=None,
-        help="Optional explicit strategy module path (e.g. quantbt.strategies.InterEquity2026-02 LiqSweepA).",
+        help="Optional explicit strategy module path (e.g. quantbt.strategies.interequity_2026_02_liqsweep_a).",
     )
     parser.add_argument(
         "--window-mode",
@@ -1622,23 +1622,23 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=None,
-        help="Output HTML path. Default: <run-dir>/iteration_<iter>_lightweight.html",
+        help="Output HTML path. Default: <run-dir>/plots/iteration_<iter>_lightweight.html",
     )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir)
-    results_path = run_dir / "limited_results.csv"
-    meta_path = run_dir / "run_meta.json"
+    results_path = run_dir / "tables" / "iterations.csv"
+    meta_path = run_dir / "spec.json"
     if not results_path.exists() or not meta_path.exists():
-        raise ValueError("Missing required run files: limited_results.csv and/or run_meta.json.")
+        raise ValueError("Missing required run files: tables/iterations.csv and/or spec.json.")
 
     results = pd.read_csv(results_path)
     if "iter" not in results.columns:
-        raise ValueError("limited_results.csv is missing 'iter' column.")
+        raise ValueError("tables/iterations.csv is missing 'iter' column.")
 
     sel = results.loc[pd.to_numeric(results["iter"], errors="coerce") == int(args.iter)]
     if sel.empty:
-        raise ValueError(f"Iteration {args.iter} not found in limited_results.csv.")
+        raise ValueError(f"Iteration {args.iter} not found in tables/iterations.csv.")
     iter_row = sel.iloc[0]
 
     run_meta = _read_json(meta_path)
@@ -1646,7 +1646,7 @@ def main() -> None:
     data_path_raw = spec.get("data")
     ts_col = str(spec.get("ts_col", "timestamp"))
     if not data_path_raw:
-        raise ValueError("run_meta.json is missing spec.data")
+        raise ValueError("spec.json is missing spec.data")
 
     data_path = Path(data_path_raw)
     if not data_path.is_absolute():
@@ -1695,7 +1695,8 @@ def main() -> None:
     )
 
     html = _build_html(payload)
-    out_path = Path(args.output) if args.output else (run_dir / f"iteration_{int(args.iter)}_lightweight.html")
+    out_path = Path(args.output) if args.output else (run_dir / "plots" / f"iteration_{int(args.iter)}_lightweight.html")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
     print(f"Saved lightweight chart: {out_path}")
 

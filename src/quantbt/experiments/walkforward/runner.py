@@ -11,6 +11,29 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantbt.artifacts import (
+    spec_path,
+    summary_path,
+    tables_dir,
+    walkforward_baseline_dir,
+    walkforward_baseline_results_path,
+    walkforward_baseline_study_path,
+    walkforward_baseline_summary_path,
+    walkforward_fold_dir,
+    walkforward_fold_is_results_path,
+    walkforward_fold_oos_equity_path,
+    walkforward_fold_oos_trades_path,
+    walkforward_fold_study_path,
+    walkforward_fold_summary_path,
+    walkforward_fold_tables_dir,
+    walkforward_folds_dir,
+    walkforward_folds_path,
+    walkforward_oos_equity_path,
+    walkforward_oos_trades_path,
+    walkforward_param_schedule_path,
+    walkforward_profile_slug,
+    write_manifest,
+)
 from quantbt.core.engine import BacktestConfig, run_backtest_sma_cross
 from quantbt.core.performance import common_performance_metrics
 from quantbt.experiments.runners import make_run_dir
@@ -652,14 +675,18 @@ def run_walkforward(
     )
 
     strategy_tag = strategy.rsplit(".", 1)[-1]
+    dataset_tag = dataset_tag_for_runs(dataset, dataset_meta)
+    profile_slug = walkforward_profile_slug(optimizer=optimizer, anchored=anchored)
     run_dir = make_run_dir(
         base=run_base,
         mode="walkforward",
         strategy=strategy_tag,
-        dataset_tag=dataset_tag_for_runs(dataset, dataset_meta),
-        variant=f"{optimizer}_{'anchored' if anchored else 'unanchored'}",
+        dataset_tag=dataset_tag,
+        variant=profile_slug,
     )
-    (run_dir / "folds").mkdir(parents=True, exist_ok=True)
+    walkforward_folds_dir(run_dir).mkdir(parents=True, exist_ok=True)
+    tables_dir(run_dir).mkdir(parents=True, exist_ok=True)
+    walkforward_baseline_dir(run_dir).mkdir(parents=True, exist_ok=True)
 
     config = {
         "strategy": strategy,
@@ -692,7 +719,19 @@ def run_walkforward(
         "param_space": param_space,
         "backtest_config": asdict(cfg),
     }
-    _write_json(run_dir / "config.json", config)
+    _write_json(spec_path(run_dir), config)
+    write_manifest(
+        run_dir,
+        workflow="walkforward",
+        strategy=strategy_tag,
+        category=profile_slug,
+        dataset_tag=dataset_tag,
+        extras={
+            "optimizer": optimizer,
+            "anchored": bool(anchored),
+            "selection_mode": selection_mode,
+        },
+    )
 
     baseline = None
     if baseline_full_data:
@@ -720,17 +759,17 @@ def run_walkforward(
             margin_rate=margin_rate,
             required_margin_abs_override=required_margin_abs,
             study_name=f"{strategy_tag}_baseline",
-            storage_url=f"sqlite:///{(run_dir / 'baseline_study.db').as_posix()}",
+            storage_url=f"sqlite:///{walkforward_baseline_study_path(run_dir).as_posix()}",
             progress_prefix="[baseline]",
             progress_every=progress_every,
         )
-        baseline_results.to_csv(run_dir / "baseline_results.csv", index=False)
+        baseline_results.to_csv(walkforward_baseline_results_path(run_dir), index=False)
         baseline = {
             "best_params": baseline_params,
             "summary": baseline_summary,
             "n_rows": int(len(baseline_results)),
         }
-        _write_json(run_dir / "baseline_summary.json", baseline)
+        _write_json(walkforward_baseline_summary_path(run_dir), baseline)
         print(
             f"[WFA] baseline done best_{objective}={_fmt_float(baseline_summary.get(objective))} "
             f"trades={int(baseline_summary.get('trades', 0))}",
@@ -753,10 +792,11 @@ def run_walkforward(
             flush=True,
         )
         fold_tag = f"fold_{fold.fold:03d}"
-        fold_dir = run_dir / "folds" / fold_tag
+        fold_dir = walkforward_fold_dir(run_dir, fold_tag)
         fold_dir.mkdir(parents=True, exist_ok=True)
+        walkforward_fold_tables_dir(run_dir, fold_tag).mkdir(parents=True, exist_ok=True)
 
-        study_path = fold_dir / "study.db"
+        study_path = walkforward_fold_study_path(run_dir, fold_tag)
         best_params, is_summary, is_results = optimize_slice(
             df=df,
             strategy_mod=strategy_mod,
@@ -784,7 +824,7 @@ def run_walkforward(
             progress_prefix=f"[fold {fold.fold}/{len(folds)} IS]",
             progress_every=progress_every,
         )
-        is_results.to_csv(fold_dir / "is_results.csv", index=False)
+        is_results.to_csv(walkforward_fold_is_results_path(run_dir, fold_tag), index=False)
 
         oos_cfg = copy.deepcopy(cfg)
         if compound_oos:
@@ -827,10 +867,10 @@ def run_walkforward(
 
         current_oos_equity = float(oos_summary["final_equity"])
 
-        oos_equity.to_csv(fold_dir / "oos_equity_curve.csv")
-        oos_trades.to_csv(fold_dir / "oos_trades.csv", index=False)
+        oos_equity.to_csv(walkforward_fold_oos_equity_path(run_dir, fold_tag))
+        oos_trades.to_csv(walkforward_fold_oos_trades_path(run_dir, fold_tag), index=False)
         _write_json(
-            fold_dir / "fold_summary.json",
+            walkforward_fold_summary_path(run_dir, fold_tag),
             {
                 "best_params": best_params,
                 "is_summary": is_summary,
@@ -870,13 +910,13 @@ def run_walkforward(
         )
 
     folds_df = pd.DataFrame(fold_rows)
-    folds_df.to_csv(run_dir / "folds.csv", index=False)
-    _write_json(run_dir / "walkforward_param_schedule.json", schedule_rows)
+    folds_df.to_csv(walkforward_folds_path(run_dir), index=False)
+    _write_json(walkforward_param_schedule_path(run_dir), schedule_rows)
 
     oos_equity_df = pd.concat(stitched_equity_parts).sort_index()
     oos_trades_df = pd.concat(stitched_trades_parts, ignore_index=True)
-    oos_equity_df.to_csv(run_dir / "oos_equity_curve.csv")
-    oos_trades_df.to_csv(run_dir / "oos_trades.csv", index=False)
+    oos_equity_df.to_csv(walkforward_oos_equity_path(run_dir))
+    oos_trades_df.to_csv(walkforward_oos_trades_path(run_dir), index=False)
 
     agg_initial = cfg.initial_equity
     agg_summary = {
@@ -948,7 +988,7 @@ def run_walkforward(
         "wfe": wfe_summary,
         "baseline_included": baseline is not None,
     }
-    _write_json(run_dir / "summary.json", summary)
+    _write_json(summary_path(run_dir), summary)
     print(
         f"[WFA] complete aggregated_{objective}={_fmt_float(agg_summary.get(objective))} "
         f"oos_trades={int(agg_summary.get('trades', 0))} "

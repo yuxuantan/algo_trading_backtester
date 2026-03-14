@@ -3,7 +3,7 @@ Interactive OOS equity curve plotter for walk-forward runs.
 
 Example:
 python3 scripts/plot_oos_equity.py \
-  --run-dir runs/walkforward/sma_cross_test_strat/eurusd_1h_20100101_20260209/grid_unanchored/run_ddmmyy_hhmmss
+  --run-dir runs/strategies/sma_cross_strategy/walkforward/grid_unanchored/eurusd_1h/2010-01-01_2026-02-09/run_2026-03-14_15-40-57
 """
 
 from __future__ import annotations
@@ -239,10 +239,10 @@ def build_figure(*, equity_df: pd.DataFrame, trades_df: pd.DataFrame, schedule: 
 def main():
     parser = argparse.ArgumentParser("Plot interactive OOS equity curve for a walk-forward run.")
     parser.add_argument("--run-dir", required=True, help="Walk-forward run directory.")
-    parser.add_argument("--equity-file", default="oos_equity_curve.csv")
-    parser.add_argument("--trades-file", default="oos_trades.csv")
-    parser.add_argument("--schedule-file", default="walkforward_param_schedule.json")
-    parser.add_argument("--output", default=None, help="Output HTML path. Default: <run-dir>/oos_equity_interactive.html")
+    parser.add_argument("--equity-file", default="tables/oos_equity_curve.csv")
+    parser.add_argument("--trades-file", default="tables/oos_trades.csv")
+    parser.add_argument("--schedule-file", default="tables/parameter_schedule.json")
+    parser.add_argument("--output", default=None, help="Output HTML path. Default: <run-dir>/plots/interactive.html")
     parser.add_argument("--title", default=None, help="Chart title.")
     parser.add_argument("--show", action="store_true", help="Open interactive window after writing HTML.")
     args = parser.parse_args()
@@ -264,7 +264,8 @@ def main():
     title = args.title or f"OOS Equity Curve - {run_dir.name}"
     fig = build_figure(equity_df=equity_df, trades_df=trades_df, schedule=schedule, title=title)
 
-    output_path = Path(args.output) if args.output else run_dir / "oos_equity_interactive.html"
+    output_path = Path(args.output) if args.output else run_dir / "plots" / "interactive.html"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(output_path, include_plotlyjs="cdn", full_html=True)
     print(f"Saved interactive chart: {output_path}")
 
