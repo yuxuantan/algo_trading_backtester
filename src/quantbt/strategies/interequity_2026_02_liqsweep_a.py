@@ -1190,6 +1190,7 @@ def constraints(params: dict) -> bool:
 
 
 STRATEGY = {
+    "name": "IE2026-03 LiqSweep A",
     "entry": {
         "mode": "all",
         "rules": [

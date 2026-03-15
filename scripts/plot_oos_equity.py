@@ -179,6 +179,7 @@ def build_figure(*, equity_df: pd.DataFrame, trades_df: pd.DataFrame, schedule: 
     eq_max = float(equity_df["equity"].max())
     y_hover = eq_max if eq_max > eq_min else eq_max + 1.0
     fold_hover_rows = []
+    long_labels = len(schedule) <= 12
     for i, item in enumerate(schedule):
         start = item["start"]
         end = item["end"]
@@ -186,6 +187,8 @@ def build_figure(*, equity_df: pd.DataFrame, trades_df: pd.DataFrame, schedule: 
             continue
         if pd.isna(end):
             end = equity_df["time"].iloc[-1]
+        line_color = "rgba(71, 85, 105, 0.45)" if i % 2 == 0 else "rgba(30, 64, 175, 0.38)"
+        fig.add_vline(x=start, line_width=1, line_dash="dot", line_color=line_color)
         fig.add_vrect(
             x0=start,
             x1=end,
@@ -194,6 +197,20 @@ def build_figure(*, equity_df: pd.DataFrame, trades_df: pd.DataFrame, schedule: 
             layer="below",
         )
         midpoint = start + (end - start) / 2 if end >= start else start
+        fold_label = f"Fold {item.get('fold')}" if long_labels else f"F{item.get('fold')}"
+        fig.add_annotation(
+            x=midpoint,
+            y=1.03 if i % 2 == 0 else 1.10,
+            xref="x",
+            yref="paper",
+            text=fold_label,
+            showarrow=False,
+            font={"size": 10, "color": "#475569"},
+            bgcolor="rgba(255,255,255,0.82)",
+            bordercolor="rgba(148,163,184,0.45)",
+            borderwidth=1,
+            borderpad=3,
+        )
         fold_hover_rows.append(
             {
                 "x": midpoint,
@@ -231,7 +248,7 @@ def build_figure(*, equity_df: pd.DataFrame, trades_df: pd.DataFrame, schedule: 
         xaxis_title="Time",
         yaxis_title="Equity",
         legend={"orientation": "h", "y": 1.02, "x": 0},
-        margin={"l": 60, "r": 30, "t": 70, "b": 50},
+        margin={"l": 60, "r": 30, "t": 110, "b": 50},
     )
     return fig
 

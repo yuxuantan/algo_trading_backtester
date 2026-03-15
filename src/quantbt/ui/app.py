@@ -39,6 +39,7 @@ from quantbt.results import (
     load_montecarlo_summary,
     load_walkforward_summary,
 )
+from quantbt.io.datasets import read_dataset_meta
 
 import numpy as np
 import pandas as pd
@@ -274,6 +275,34 @@ LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
     },
 ]
 
+WFA_WORKBOOK_INPUTS: list[str] = [
+    "WFA data start/end",
+    "Anchored / unanchored",
+    "In-period years",
+    "Out-period years",
+    "Fitness factor",
+    "Baseline entry param set",
+    "Baseline exit param set",
+]
+
+WFA_WORKBOOK_REVIEW_ROWS: list[dict[str, str]] = [
+    {"output": "total net profit", "pass_criteria": ">$5k per year per contract"},
+    {"output": "profit factor", "pass_criteria": "> 1.0"},
+    {"output": "avg trade net profit", "pass_criteria": "> $50 per trade per contract"},
+    {"output": "tharp expectancy", "pass_criteria": "> 0.1"},
+    {"output": "max dd", "pass_criteria": "< 20%"},
+    {"output": "closed trade equity curve steadiness", "pass_criteria": "looks smooth diagonal up not mostly flat with rapid rises"},
+    {"output": "dd period", "pass_criteria": "< 3 months (my own criteria)"},
+    {"output": "win rate (my own metric)", "pass_criteria": ""},
+]
+
+WFA_FITNESS_FACTOR_PRESETS: dict[str, dict[str, str]] = {
+    "Highest net profit": {"objective": "net_profit_abs", "direction": "maximize"},
+    "Highest return on account": {"objective": "return_on_account", "direction": "maximize"},
+    "Highest profit factor": {"objective": "profit_factor", "direction": "maximize"},
+    "Lowest max drawdown %": {"objective": "max_drawdown_abs_%", "direction": "minimize"},
+}
+
 WORKBOOK_REVIEW_METRICS: list[dict[str, str]] = [
     {
         "label": "% of iterations profitable",
@@ -299,6 +328,46 @@ WORKBOOK_REVIEW_METRICS: list[dict[str, str]] = [
         "label": "Average hold bars",
         "default_unit": "bars",
         "aliases": "avg hold bars|avg bars held",
+    },
+    {
+        "label": "total net profit",
+        "default_unit": "raw",
+        "aliases": "net profit|annualized net profit",
+    },
+    {
+        "label": "profit factor",
+        "default_unit": "ratio",
+        "aliases": "",
+    },
+    {
+        "label": "avg trade net profit",
+        "default_unit": "raw",
+        "aliases": "average trade net profit|avg trade profit",
+    },
+    {
+        "label": "tharp expectancy",
+        "default_unit": "ratio",
+        "aliases": "expectancy",
+    },
+    {
+        "label": "max dd",
+        "default_unit": "%",
+        "aliases": "max drawdown|max dd %",
+    },
+    {
+        "label": "closed trade equity curve steadiness",
+        "default_unit": "raw",
+        "aliases": "equity curve steadiness|equity steadiness",
+    },
+    {
+        "label": "dd period",
+        "default_unit": "bars",
+        "aliases": "drawdown period|max drawdown duration",
+    },
+    {
+        "label": "win rate (my own metric)",
+        "default_unit": "%",
+        "aliases": "win rate",
     },
 ]
 WORKBOOK_REVIEW_METRIC_OPTIONS: list[str] = [m["label"] for m in WORKBOOK_REVIEW_METRICS] + ["Custom"]
@@ -803,6 +872,272 @@ def _sanitize_strategy_limited_params(
     return sanitized
 
 
+def _build_strategy_walkforward_param_contract(
+    strategy_cfg: dict[str, Any],
+    *,
+    params_defaults: dict[str, Any],
+    raw_param_space: dict[str, Any],
+) -> dict[str, Any]:
+    limited_cfg = strategy_cfg.get("limited_test", {}) if isinstance(strategy_cfg, dict) else {}
+    params_defaults = copy.deepcopy(params_defaults) if isinstance(params_defaults, dict) else {}
+    raw_param_space = copy.deepcopy(raw_param_space) if isinstance(raw_param_space, dict) else {}
+
+    sections: dict[str, dict[str, Any]] = {}
+    combined_space: dict[str, Any] = {}
+    editable_keys_seen: set[str] = set()
+    fixed_keys_seen: set[str] = set()
+
+    for section_name in ("entry", "exit"):
+        section_cfg = limited_cfg.get(section_name, {}) if isinstance(limited_cfg, dict) else {}
+        raw_editable = section_cfg.get("optimizable", {}) if isinstance(section_cfg, dict) else {}
+        raw_fixed = section_cfg.get("non_optimizable", []) if isinstance(section_cfg, dict) else []
+        if isinstance(raw_editable, list):
+            raw_editable = {str(key): {} for key in raw_editable}
+        if not isinstance(raw_editable, dict):
+            raw_editable = {}
+        if not isinstance(raw_fixed, list):
+            raw_fixed = []
+
+        editable_specs: dict[str, dict[str, Any]] = {}
+        for raw_key, raw_spec in raw_editable.items():
+            key = str(raw_key or "").strip()
+            if not key or key in editable_keys_seen or key not in params_defaults:
+                continue
+            default_value = params_defaults.get(key)
+            integer_default = isinstance(default_value, int) and not isinstance(default_value, bool)
+            spec: dict[str, Any] = {
+                "key": key,
+                "label": key.replace("_", " "),
+                "integer": bool(integer_default),
+                "default": copy.deepcopy(default_value),
+            }
+            if isinstance(raw_spec, dict):
+                label = str(raw_spec.get("label", "") or "").strip()
+                if label:
+                    spec["label"] = label
+                if "integer" in raw_spec:
+                    spec["integer"] = bool(raw_spec.get("integer"))
+                if "default" in raw_spec:
+                    spec["default"] = copy.deepcopy(raw_spec.get("default"))
+                values = raw_spec.get("values")
+                if isinstance(values, list) and values:
+                    spec["values"] = copy.deepcopy(values)
+                raw_end = raw_spec.get("end", raw_spec.get("stop"))
+                if all(name in raw_spec for name in ("start", "step")) and raw_end is not None:
+                    try:
+                        spec["range"] = {
+                            "start": float(raw_spec["start"]),
+                            "end": float(raw_end),
+                            "step": float(raw_spec["step"]),
+                            "integer": bool(spec["integer"]),
+                        }
+                        spec["values"] = _build_numeric_range_values(
+                            float(spec["range"]["start"]),
+                            float(spec["range"]["end"]),
+                            float(spec["range"]["step"]),
+                            integer=bool(spec["integer"]),
+                        )
+                    except Exception:
+                        pass
+            elif isinstance(raw_spec, list) and raw_spec:
+                spec["values"] = copy.deepcopy(raw_spec)
+
+            if "values" not in spec:
+                if key in raw_param_space:
+                    raw_values = raw_param_space.get(key)
+                    if isinstance(raw_values, list) and raw_values:
+                        spec["values"] = copy.deepcopy(raw_values)
+                if "values" not in spec:
+                    spec["values"] = [copy.deepcopy(spec.get("default", default_value))]
+            editable_specs[key] = spec
+            editable_keys_seen.add(key)
+            combined_space[key] = copy.deepcopy(spec["values"])
+
+        fixed_params: dict[str, Any] = {}
+        for raw_key in raw_fixed:
+            key = str(raw_key or "").strip()
+            if (
+                key
+                and key in params_defaults
+                and key not in editable_keys_seen
+                and key not in fixed_keys_seen
+            ):
+                fixed_params[key] = copy.deepcopy(params_defaults[key])
+                fixed_keys_seen.add(key)
+                combined_space[key] = copy.deepcopy(params_defaults[key])
+
+        sections[section_name] = {
+            "editable_specs": editable_specs,
+            "fixed_params": fixed_params,
+        }
+
+    has_policy = any(
+        bool(section.get("editable_specs")) or bool(section.get("fixed_params"))
+        for section in sections.values()
+    )
+
+    if not has_policy and raw_param_space:
+        fallback_editable: dict[str, dict[str, Any]] = {}
+        fallback_fixed: dict[str, Any] = {}
+        for raw_key, raw_value in raw_param_space.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                continue
+            values = copy.deepcopy(raw_value if isinstance(raw_value, list) else [raw_value])
+            if not values:
+                continue
+            default_value = copy.deepcopy(params_defaults.get(key, values[0]))
+            integer_default = isinstance(default_value, int) and not isinstance(default_value, bool)
+            if len(values) > 1:
+                spec: dict[str, Any] = {
+                    "key": key,
+                    "label": key.replace("_", " "),
+                    "integer": bool(integer_default),
+                    "default": copy.deepcopy(default_value),
+                    "values": copy.deepcopy(values),
+                }
+                derived = _derive_numeric_range_spec(values)
+                if derived is not None:
+                    start, end, step, integer_mode = derived
+                    spec["range"] = {
+                        "start": float(start),
+                        "end": float(end),
+                        "step": float(step),
+                        "integer": bool(integer_mode),
+                    }
+                    spec["integer"] = bool(integer_mode)
+                fallback_editable[key] = spec
+                combined_space[key] = copy.deepcopy(values)
+            else:
+                fallback_fixed[key] = copy.deepcopy(values[0])
+                combined_space[key] = copy.deepcopy(values[0])
+        sections = {
+            "strategy": {
+                "editable_specs": fallback_editable,
+                "fixed_params": fallback_fixed,
+            }
+        }
+        has_policy = bool(fallback_editable or fallback_fixed)
+
+    return {
+        "has_policy": bool(has_policy),
+        "sections": sections,
+        "default_param_space": combined_space,
+        "raw_param_space": raw_param_space,
+    }
+
+
+def _normalize_walkforward_param_space_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return copy.deepcopy(value)
+    return copy.deepcopy(value)
+
+
+def _render_walkforward_param_policy_section(
+    *,
+    title: str,
+    section_contract: dict[str, Any],
+    param_space: dict[str, Any],
+    widget_prefix: str,
+    checks: list[tuple[bool, str, str]],
+) -> dict[str, Any]:
+    working_space = copy.deepcopy(param_space)
+    editable_specs = dict(section_contract.get("editable_specs", {}))
+    fixed_params = dict(section_contract.get("fixed_params", {}))
+
+    st.markdown(f"**{title}**")
+    if editable_specs:
+        st.caption(
+            "Only the strategy-defined optimisable parameters are editable here. "
+            "Locked strategy parameters remain fixed below."
+        )
+        for key, spec in editable_specs.items():
+            label = str(spec.get("label", key.replace("_", " ")))
+            integer_mode = bool(spec.get("integer", False))
+            value_seed = copy.deepcopy(working_space.get(key, spec.get("values", [])))
+            range_spec = _editable_range_defaults(spec, value_seed)
+            widget_key_base = f"{widget_prefix}_{key}"
+
+            if range_spec is not None:
+                start_default, end_default, step_default, _ = range_spec
+                start_seed = int(round(start_default)) if integer_mode else float(start_default)
+                end_seed = int(round(end_default)) if integer_mode else float(end_default)
+                step_seed = max(1, int(round(step_default))) if integer_mode else float(step_default)
+                _sync_widget_from_source(f"{widget_key_base}_start", start_seed)
+                _sync_widget_from_source(f"{widget_key_base}_end", end_seed)
+                _sync_widget_from_source(f"{widget_key_base}_step", step_seed)
+                st.markdown(f"`{key}`")
+                range_cols = st.columns(3)
+                if integer_mode:
+                    start_val = int(range_cols[0].number_input(f"{label} start", step=1, key=f"{widget_key_base}_start"))
+                    stop_val = int(range_cols[1].number_input(f"{label} end", step=1, key=f"{widget_key_base}_end"))
+                    step_val = int(
+                        range_cols[2].number_input(
+                            f"{label} step",
+                            min_value=1,
+                            step=1,
+                            key=f"{widget_key_base}_step",
+                        )
+                    )
+                else:
+                    number_step = float(step_seed) if math.isfinite(float(step_seed)) and float(step_seed) > 0 else 0.1
+                    start_val = float(
+                        range_cols[0].number_input(
+                            f"{label} start",
+                            step=number_step,
+                            format="%.4f",
+                            key=f"{widget_key_base}_start",
+                        )
+                    )
+                    stop_val = float(
+                        range_cols[1].number_input(
+                            f"{label} end",
+                            step=number_step,
+                            format="%.4f",
+                            key=f"{widget_key_base}_end",
+                        )
+                    )
+                    step_val = float(
+                        range_cols[2].number_input(
+                            f"{label} step",
+                            min_value=float(number_step / 10.0),
+                            step=number_step,
+                            format="%.4f",
+                            key=f"{widget_key_base}_step",
+                        )
+                    )
+                try:
+                    range_values = _build_numeric_range_values(
+                        start_val,
+                        stop_val,
+                        step_val,
+                        integer=integer_mode,
+                    )
+                    working_space[key] = range_values
+                    checks.append((True, label, f"{len(range_values)} values"))
+                except Exception as e:
+                    checks.append((False, label, str(e)))
+            else:
+                raw_default = _value_to_csv_text(value_seed)
+                _sync_widget_from_source(f"{widget_key_base}_values", raw_default)
+                raw_text = st.text_input(label, key=f"{widget_key_base}_values")
+                value_kind = "int" if integer_mode else "float"
+                parse_ok, parsed_value, parse_detail = _parse_csv_numeric_text(raw_text, kind=value_kind)
+                checks.append((parse_ok, label, parse_detail))
+                if parse_ok and parsed_value is not None:
+                    working_space[key] = _normalize_walkforward_param_space_value(parsed_value)
+    else:
+        st.caption("No optimisable parameters are defined for this section.")
+
+    if fixed_params:
+        st.caption("Locked strategy params:")
+        st.code(_json_pretty(fixed_params), language="json")
+        for key, value in fixed_params.items():
+            working_space.setdefault(key, copy.deepcopy(value))
+
+    return working_space
+
+
 def _estimate_limited_iterations(
     *,
     entry_plugin_name: str | None,
@@ -1014,6 +1349,7 @@ def _discover_strategy_catalog(_fingerprint: tuple[tuple[str, int, int], ...]) -
         entry: dict[str, Any] = {
             "module": module_path,
             "file": _rel(py),
+            "display_name": short,
             "param_space": {},
             "strategy_config": {},
             "params_defaults": {},
@@ -1039,12 +1375,125 @@ def _discover_strategy_catalog(_fingerprint: tuple[tuple[str, int, int], ...]) -
             entry["param_space"] = param_space
             entry["strategy_config"] = strategy_cfg
             entry["params_defaults"] = defaults
+            display_name = str(strategy_cfg.get("name", short)).strip() if isinstance(strategy_cfg, dict) else short
+            entry["display_name"] = display_name or short
         except Exception as e:
             entry["error"] = str(e)
 
         catalog[short] = entry
 
     return catalog
+
+
+def _strategy_display_name(strategy_key: str, strategy_catalog: dict[str, dict[str, Any]]) -> str:
+    key = str(strategy_key or "").strip()
+    info = strategy_catalog.get(key, {}) if isinstance(strategy_catalog, dict) else {}
+    display_name = str(info.get("display_name", "") or "").strip()
+    return display_name or key
+
+
+def _sorted_strategy_keys(strategy_catalog: dict[str, dict[str, Any]]) -> list[str]:
+    return sorted(strategy_catalog.keys(), key=lambda key: _strategy_display_name(key, strategy_catalog).lower())
+
+
+@st.cache_data(show_spinner=False)
+def _dataset_timestamp_bounds(dataset_path: str, ts_col: str) -> dict[str, Any]:
+    path = _abs_path(dataset_path)
+    meta = read_dataset_meta(path)
+    meta_start = None
+    meta_end = None
+    meta_rows = None
+    if isinstance(meta, dict):
+        try:
+            meta_start = pd.to_datetime(meta.get("start"), errors="coerce")
+        except Exception:
+            meta_start = None
+        try:
+            meta_end = pd.to_datetime(meta.get("end"), errors="coerce")
+        except Exception:
+            meta_end = None
+        try:
+            meta_rows = int(meta.get("rows", 0) or 0)
+        except Exception:
+            meta_rows = None
+
+    try:
+        df = pd.read_csv(path, usecols=[ts_col])
+        ts = pd.to_datetime(df[ts_col], errors="coerce").dropna().sort_values().reset_index(drop=True)
+        if ts.empty:
+            raise ValueError(f"No valid timestamps found in `{ts_col}`.")
+        values = ts.astype("int64").to_numpy()
+        return {
+            "ok": True,
+            "min_date": ts.iloc[0].date(),
+            "max_date": ts.iloc[-1].date(),
+            "row_count": int(len(ts)),
+            "values_ns": values,
+            "meta_start": meta_start,
+            "meta_end": meta_end,
+        }
+    except Exception as e:
+        if meta_start is not None and meta_end is not None and meta_rows and meta_rows > 0:
+            return {
+                "ok": False,
+                "min_date": meta_start.date(),
+                "max_date": meta_end.date(),
+                "row_count": int(meta_rows),
+                "values_ns": None,
+                "meta_start": meta_start,
+                "meta_end": meta_end,
+                "error": str(e),
+            }
+        return {
+            "ok": False,
+            "min_date": None,
+            "max_date": None,
+            "row_count": 0,
+            "values_ns": None,
+            "meta_start": meta_start,
+            "meta_end": meta_end,
+            "error": str(e),
+        }
+
+
+def _walkforward_window_from_dates(
+    *,
+    bounds: dict[str, Any],
+    start_value: date,
+    end_value: date,
+) -> dict[str, Any]:
+    if start_value > end_value:
+        raise ValueError("WFA data start must be on or before WFA data end.")
+
+    values_ns = bounds.get("values_ns")
+    if values_ns is None:
+        row_count = int(bounds.get("row_count", 0) or 0)
+        start_bar = 0
+        end_bar = row_count if row_count > 0 else None
+        span_days = max((pd.Timestamp(end_value) - pd.Timestamp(start_value)).days, 1)
+        selected_rows = row_count
+    else:
+        arr = np.asarray(values_ns, dtype=np.int64)
+        start_ns = pd.Timestamp(start_value).value
+        end_exclusive_ns = (pd.Timestamp(end_value) + pd.Timedelta(days=1)).value
+        start_bar = int(np.searchsorted(arr, start_ns, side="left"))
+        end_bar = int(np.searchsorted(arr, end_exclusive_ns, side="left"))
+        selected_rows = int(max(0, end_bar - start_bar))
+        if selected_rows <= 0:
+            raise ValueError("Selected WFA date range contains no rows.")
+        first_ts = pd.Timestamp(int(arr[start_bar]), unit="ns")
+        last_ts = pd.Timestamp(int(arr[end_bar - 1]), unit="ns")
+        span_days = max(int((last_ts - first_ts).days), 1)
+
+    years = float(span_days / 365.25) if span_days > 0 else float("nan")
+    bars_per_year = float(selected_rows / years) if np.isfinite(years) and years > 0 else float("nan")
+    return {
+        "start_bar": int(start_bar),
+        "end_bar": int(end_bar) if end_bar is not None else None,
+        "selected_rows": int(selected_rows),
+        "bars_per_year": float(bars_per_year) if np.isfinite(bars_per_year) else float("nan"),
+        "years": float(years) if np.isfinite(years) else float("nan"),
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -1377,6 +1826,47 @@ def _infer_initial_equity_from_spec(spec: dict[str, Any]) -> float:
     if not np.isfinite(initial_equity) or initial_equity <= 0:
         return 100000.0
     return float(initial_equity)
+
+
+def _estimate_montecarlo_parent_context(run_dir: Path | None) -> dict[str, Any]:
+    if run_dir is None:
+        return {
+            "trade_pool_count": 0,
+            "historical_years": float("nan"),
+            "estimated_trades_per_year": float("nan"),
+        }
+
+    trade_pool_count = 0
+    historical_years = float("nan")
+    oos_trades_path = walkforward_oos_trades_path(run_dir)
+    if oos_trades_path.exists():
+        try:
+            oos_trades = pd.read_csv(oos_trades_path)
+            trade_pool_count = int(len(oos_trades))
+        except Exception:
+            trade_pool_count = 0
+
+    oos_eq_path = walkforward_oos_equity_path(run_dir)
+    if oos_eq_path.exists():
+        try:
+            eq_df = pd.read_csv(oos_eq_path)
+            if "time" in eq_df.columns:
+                ts = pd.to_datetime(eq_df["time"], utc=True, errors="coerce").dropna()
+                if not ts.empty:
+                    historical_years = float(years_from_index(pd.DatetimeIndex(ts)))
+        except Exception:
+            historical_years = float("nan")
+
+    if np.isfinite(historical_years) and historical_years > 0 and trade_pool_count > 0:
+        estimated_trades_per_year = float(trade_pool_count / historical_years)
+    else:
+        estimated_trades_per_year = float("nan")
+
+    return {
+        "trade_pool_count": int(trade_pool_count),
+        "historical_years": float(historical_years) if np.isfinite(historical_years) else float("nan"),
+        "estimated_trades_per_year": float(estimated_trades_per_year) if np.isfinite(estimated_trades_per_year) else float("nan"),
+    }
 
 
 def _limited_net_profit_series(results: pd.DataFrame, *, initial_equity: float) -> pd.Series:
@@ -1954,6 +2444,85 @@ def _extract_numeric_param(raw: Any, keys: list[str]) -> float:
                 if pd.notna(v):
                     return float(v)
     return float("nan")
+
+
+def _compact_params_cell(raw: Any) -> str:
+    parsed = _parse_params_cell(raw)
+    if isinstance(parsed, (dict, list)):
+        try:
+            return json.dumps(parsed, sort_keys=True, separators=(", ", ": "), default=str)
+        except Exception:
+            return str(parsed)
+    text = str(raw or "").strip()
+    return text
+
+
+def _time_window_label(start_value: Any, end_value: Any) -> str:
+    start_text = str(start_value or "").strip()
+    end_text = str(end_value or "").strip()
+    if start_text and end_text:
+        return f"{start_text} -> {end_text}"
+    if start_text:
+        return start_text
+    if end_text:
+        return end_text
+    return ""
+
+
+def _add_walkforward_fold_annotations(fig: Any, folds: pd.DataFrame) -> None:
+    if folds is None or folds.empty or not hasattr(fig, "add_annotation"):
+        return
+
+    schedule_rows: list[dict[str, Any]] = []
+    for _, row in folds.iterrows():
+        start = pd.to_datetime(row.get("oos_start_time"), utc=True, errors="coerce")
+        end = pd.to_datetime(row.get("oos_end_time_exclusive"), utc=True, errors="coerce")
+        if pd.isna(start):
+            continue
+        if pd.isna(end) or end < start:
+            end = start
+        schedule_rows.append(
+            {
+                "fold": int(row.get("fold")) if pd.notna(row.get("fold")) else None,
+                "start": start,
+                "end": end,
+            }
+        )
+
+    if not schedule_rows:
+        return
+
+    long_labels = len(schedule_rows) <= 12
+    for i, item in enumerate(schedule_rows):
+        start = item["start"]
+        end = item["end"]
+        fold_num = item.get("fold")
+        fill = "rgba(148,163,184,0.08)" if i % 2 == 0 else "rgba(59,130,246,0.06)"
+        line = "rgba(71,85,105,0.45)" if i % 2 == 0 else "rgba(30,64,175,0.38)"
+        fig.add_vline(x=start, line_width=1, line_dash="dot", line_color=line)
+        if end > start:
+            fig.add_vrect(
+                x0=start,
+                x1=end,
+                fillcolor=fill,
+                line_width=0,
+                layer="below",
+            )
+        midpoint = start + (end - start) / 2 if end > start else start
+        label = f"Fold {fold_num}" if long_labels else f"F{fold_num}"
+        fig.add_annotation(
+            x=midpoint,
+            y=1.03 if i % 2 == 0 else 1.10,
+            xref="x",
+            yref="paper",
+            text=label,
+            showarrow=False,
+            font={"size": 10, "color": "#475569"},
+            bgcolor="rgba(255,255,255,0.82)",
+            bordercolor="rgba(148,163,184,0.45)",
+            borderwidth=1,
+            borderpad=3,
+        )
 
 
 def _iqr_numeric(df: pd.DataFrame, col: str) -> float:
@@ -2716,6 +3285,168 @@ def _ensure_limited_iteration_chart(*, run_dir: Path, iter_id: int) -> tuple[boo
     return False, out.strip() or f"Chart file not found after generation: {_rel(out_file)}"
 
 
+def _fmt_currency_display(value: Any) -> str:
+    x = _as_float(value)
+    return "n/a" if not np.isfinite(x) else f"${x:,.2f}"
+
+
+def _fmt_percent_display(value: Any) -> str:
+    x = _as_float(value)
+    return "n/a" if not np.isfinite(x) else f"{x:.2f}%"
+
+
+def _fmt_ratio_display(value: Any) -> str:
+    x = _as_float(value)
+    return "n/a" if not np.isfinite(x) else f"{x:.2f}"
+
+
+def _build_walkforward_workbook_review(summary: dict[str, Any]) -> tuple[pd.DataFrame, str]:
+    aggregated = summary.get("aggregated_oos_summary", {}) if isinstance(summary.get("aggregated_oos_summary"), dict) else {}
+    initial_review = summary.get("initial_review", {}) if isinstance(summary.get("initial_review"), dict) else {}
+    metrics = initial_review.get("metrics", {}) if isinstance(initial_review.get("metrics"), dict) else {}
+
+    annualized_net = _as_float(metrics.get("annualized_net_profit_abs"))
+    total_net = _as_float(metrics.get("total_net_profit_abs", aggregated.get("net_profit_abs")))
+    profit_factor = _as_float(metrics.get("profit_factor"))
+    avg_trade_net = _as_float(metrics.get("avg_trade_net_profit_abs"))
+    tharp = _as_float(metrics.get("tharp_expectancy"))
+    max_dd_pct = _as_float(metrics.get("max_drawdown_abs_%", aggregated.get("max_drawdown_abs_%")))
+    slope = _as_float(metrics.get("equity_slope_per_bar", aggregated.get("equity_slope_per_bar")))
+    r2 = _as_float(metrics.get("equity_linearity_r2", aggregated.get("equity_linearity_r2")))
+    flat_ratio = _as_float(metrics.get("flat_bars_ratio"))
+    fuzziness = _as_float(metrics.get("equity_fuzziness"))
+    dd_bars = _as_float(metrics.get("max_drawdown_duration_bars"))
+    dd_ratio = _as_float(metrics.get("max_drawdown_duration_ratio"))
+    equity_years = _as_float(metrics.get("equity_years", aggregated.get("equity_years")))
+    win_rate_pct = _as_float(aggregated.get("win_rate_%", metrics.get("win_rate_%")))
+
+    dd_months = float("nan")
+    if np.isfinite(dd_ratio) and np.isfinite(equity_years) and equity_years > 0:
+        dd_months = float(dd_ratio * equity_years * 12.0)
+
+    if np.isfinite(slope) or np.isfinite(r2) or np.isfinite(flat_ratio) or np.isfinite(fuzziness):
+        steadiness_actual = (
+            f"R2 {_fmt_ratio_display(r2)} | flat {_fmt_percent_display(flat_ratio * 100.0)} | "
+            f"fuzz {_fmt_ratio_display(fuzziness)} | slope {'up' if np.isfinite(slope) and slope > 0 else 'down/flat'}"
+        )
+    else:
+        steadiness_actual = "n/a"
+
+    rows: list[dict[str, Any]] = [
+        {
+            "Metric": "total net profit",
+            "Actual": (
+                (f"{_fmt_currency_display(annualized_net)}/yr" if np.isfinite(annualized_net) else "n/a")
+                + (f" | total {_fmt_currency_display(total_net)}" if np.isfinite(total_net) else "")
+            ),
+            "Pass Criteria": ">$5k per year per contract",
+            "Verdict": "PASS" if np.isfinite(annualized_net) and annualized_net > 5000.0 else "FAIL",
+        },
+        {
+            "Metric": "profit factor",
+            "Actual": _fmt_ratio_display(profit_factor),
+            "Pass Criteria": "> 1.0",
+            "Verdict": "PASS" if np.isfinite(profit_factor) and profit_factor > 1.0 else "FAIL",
+        },
+        {
+            "Metric": "avg trade net profit",
+            "Actual": _fmt_currency_display(avg_trade_net),
+            "Pass Criteria": "> $50 per trade per contract",
+            "Verdict": "PASS" if np.isfinite(avg_trade_net) and avg_trade_net > 50.0 else "FAIL",
+        },
+        {
+            "Metric": "tharp expectancy",
+            "Actual": _fmt_ratio_display(tharp),
+            "Pass Criteria": "> 0.1",
+            "Verdict": "PASS" if np.isfinite(tharp) and tharp > 0.10 else "FAIL",
+        },
+        {
+            "Metric": "max dd",
+            "Actual": _fmt_percent_display(max_dd_pct),
+            "Pass Criteria": "< 20%",
+            "Verdict": "PASS" if np.isfinite(max_dd_pct) and max_dd_pct < 20.0 else "FAIL",
+        },
+        {
+            "Metric": "closed trade equity curve steadiness",
+            "Actual": steadiness_actual,
+            "Pass Criteria": "looks smooth diagonal up; not mostly flat with rapid rises",
+            "Verdict": (
+                "PASS"
+                if np.isfinite(slope)
+                and slope > 0
+                and np.isfinite(r2)
+                and r2 >= 0.60
+                and np.isfinite(flat_ratio)
+                and flat_ratio <= 0.35
+                and np.isfinite(fuzziness)
+                and fuzziness <= 0.40
+                else (
+                    "RETRY"
+                    if np.isfinite(slope)
+                    and slope > 0
+                    and np.isfinite(r2)
+                    and r2 >= 0.45
+                    and np.isfinite(flat_ratio)
+                    and flat_ratio <= 0.50
+                    and np.isfinite(fuzziness)
+                    and fuzziness <= 0.55
+                    else "FAIL"
+                )
+            ),
+        },
+        {
+            "Metric": "dd period",
+            "Actual": (
+                f"{dd_months:.2f} months"
+                + (f" ({int(round(dd_bars))} bars)" if np.isfinite(dd_bars) else "")
+                if np.isfinite(dd_months)
+                else (f"{int(round(dd_bars))} bars" if np.isfinite(dd_bars) else "n/a")
+            ),
+            "Pass Criteria": "< 3 months (my own criteria)",
+            "Verdict": (
+                "PASS"
+                if np.isfinite(dd_months) and dd_months < 3.0
+                else ("RETRY" if np.isfinite(dd_months) and dd_months < 4.5 else ("FAIL" if np.isfinite(dd_months) else "INFO"))
+            ),
+        },
+        {
+            "Metric": "win rate (my own metric)",
+            "Actual": _fmt_percent_display(win_rate_pct),
+            "Pass Criteria": "No workbook threshold defined",
+            "Verdict": "INFO",
+        },
+    ]
+
+    verdicts = [str(row.get("Verdict", "")).upper() for row in rows]
+    if any(v == "FAIL" for v in verdicts):
+        decision = "FAIL"
+    elif any(v == "RETRY" for v in verdicts):
+        decision = "RETRY"
+    else:
+        decision = "PASS"
+
+    return pd.DataFrame(rows), decision
+
+
+def _render_walkforward_workbook_review(summary: dict[str, Any]) -> None:
+    review_df, decision = _build_walkforward_workbook_review(summary)
+    _render_decision_badge("Walk-forward workbook review", decision)
+
+    aggregated = summary.get("aggregated_oos_summary", {}) if isinstance(summary.get("aggregated_oos_summary"), dict) else {}
+    initial_review = summary.get("initial_review", {}) if isinstance(summary.get("initial_review"), dict) else {}
+    metrics = initial_review.get("metrics", {}) if isinstance(initial_review.get("metrics"), dict) else {}
+
+    _render_metric_row(
+        [
+            ("Annualized Net", _fmt_currency_display(metrics.get("annualized_net_profit_abs")), "{}"),
+            ("Profit Factor", _fmt_ratio_display(metrics.get("profit_factor")), "{}"),
+            ("Avg Trade Net", _fmt_currency_display(metrics.get("avg_trade_net_profit_abs")), "{}"),
+            ("Max DD %", _fmt_percent_display(metrics.get("max_drawdown_abs_%", aggregated.get("max_drawdown_abs_%"))), "{}"),
+        ]
+    )
+    _render_verdict_dataframe(review_df)
+
+
 def _render_walkforward_results(run_dir: Path) -> None:
     wf_summary_path = summary_path(run_dir)
     config_path = spec_path(run_dir)
@@ -2734,8 +3465,10 @@ def _render_walkforward_results(run_dir: Path) -> None:
 
     st.subheader("Walk-Forward Result")
     if strategy_short:
-        st.markdown(_reference_link(f"Strategy: {strategy_short}", "strategy", strategy_short))
-        strategy_info = _discover_strategy_catalog(_strategy_catalog_fingerprint()).get(strategy_short, {})
+        discovered_catalog = _discover_strategy_catalog(_strategy_catalog_fingerprint())
+        strategy_info = discovered_catalog.get(strategy_short, {})
+        strategy_label = _strategy_display_name(strategy_short, discovered_catalog)
+        st.markdown(_reference_link(f"Strategy: {strategy_label}", "strategy", strategy_short))
         strategy_cfg = strategy_info.get("strategy_config", {}) if isinstance(strategy_info, dict) else {}
         entry_name = None
         if isinstance(strategy_cfg, dict):
@@ -2748,6 +3481,8 @@ def _render_walkforward_results(run_dir: Path) -> None:
                 link_cols[0].markdown(_reference_link(f"Entry: {entry_name}", "entry", str(entry_name)))
             if exit_name:
                 link_cols[1].markdown(_reference_link(f"Exit: {exit_name}", "exit", str(exit_name)))
+
+    _render_walkforward_workbook_review(summary)
 
     profit_col = "oos_net_profit_abs" if "oos_net_profit_abs" in folds.columns else "oos_total_return_%"
     profits_all = pd.to_numeric(folds.get(profit_col), errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -2772,6 +3507,7 @@ def _render_walkforward_results(run_dir: Path) -> None:
     )
     _render_decision_badge("Walk-Forward OOS Survival + Concentration", decision)
 
+    st.markdown("**Secondary diagnostics**")
     _render_metric_row(
         [
             ("OOS Segments", segment_count, "{:d}"),
@@ -2809,29 +3545,56 @@ def _render_walkforward_results(run_dir: Path) -> None:
     st.dataframe(threshold_rows, use_container_width=True, hide_index=True)
 
     st.subheader("OOS Segment Results")
-    view_cols = [
-        c
-        for c in [
-            "fold",
-            "oos_trades",
-            "oos_net_profit_abs",
-            "oos_total_return_%",
-            "oos_max_drawdown_abs_%",
-            "params",
-        ]
-        if c in folds.columns
-    ]
-    fold_view = folds[view_cols] if view_cols else folds
-    metric_col = "oos_net_profit_abs" if "oos_net_profit_abs" in fold_view.columns else "oos_total_return_%"
+    fold_view = pd.DataFrame(
+        {
+            "Fold": folds.get("fold", pd.Series(index=folds.index, dtype=int)),
+            "IS Period": [
+                _time_window_label(row.get("is_start_time"), row.get("is_end_time_exclusive"))
+                for _, row in folds.iterrows()
+            ],
+            "OOS Period": [
+                _time_window_label(row.get("oos_start_time"), row.get("oos_end_time_exclusive"))
+                for _, row in folds.iterrows()
+            ],
+            "Chosen Params": [
+                _compact_params_cell(row.get("best_params"))
+                for _, row in folds.iterrows()
+            ],
+            "OOS Trades": pd.to_numeric(
+                folds.get("oos_trades", pd.Series(index=folds.index, dtype=float)),
+                errors="coerce",
+            ),
+            "OOS Net Profit": pd.to_numeric(
+                folds.get("oos_net_profit_abs", pd.Series(index=folds.index, dtype=float)),
+                errors="coerce",
+            ),
+            "OOS Return %": pd.to_numeric(
+                folds.get("oos_total_return_%", pd.Series(index=folds.index, dtype=float)),
+                errors="coerce",
+            ),
+            "OOS Max DD %": pd.to_numeric(
+                folds.get("oos_max_drawdown_abs_%", pd.Series(index=folds.index, dtype=float)),
+                errors="coerce",
+            ),
+            "WFE %": pd.to_numeric(
+                folds.get("wfe_pct", pd.Series(index=folds.index, dtype=float)),
+                errors="coerce",
+            ),
+            "WFE Pass": folds.get("wfe_pass", pd.Series(index=folds.index, dtype=object)),
+        }
+    )
+    metric_col = "OOS Net Profit" if "OOS Net Profit" in fold_view.columns else "OOS Return %"
     _render_win_loss_dataframe(fold_view, metric_col=metric_col, hide_index=True)
 
     equity_path = walkforward_oos_equity_path(run_dir)
     eq = pd.read_csv(equity_path) if equity_path.exists() else pd.DataFrame()
     if {"time", "equity"}.issubset(eq.columns):
-        eq["time"] = pd.to_datetime(eq["time"], errors="coerce")
+        eq["time"] = pd.to_datetime(eq["time"], utc=True, errors="coerce")
         st.subheader("OOS Equity Curve")
         if px is not None:
             fig = px.line(eq, x="time", y="equity", title="OOS Equity Curve")
+            _add_walkforward_fold_annotations(fig, folds)
+            fig.update_layout(margin={"l": 60, "r": 30, "t": 110, "b": 50})
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.line_chart(eq.set_index("time")["equity"])
@@ -3565,6 +4328,7 @@ def _render_hierarchical_results_browser(
         label="Strategy",
         options=strategy_options,
         key="results_browser_strategy",
+        format_func=lambda key: _strategy_display_name(key, strategy_catalog),
     )
     strategy_rows = [row for row in rows if str(row.get("strategy", "")).strip() == selected_strategy]
 
@@ -3638,7 +4402,7 @@ def _render_hierarchical_results_browser(
     workflow_key = str(selected_row.get("workflow", "")).strip().lower()
     breadcrumb = " / ".join(
         [
-            selected_strategy,
+            _strategy_display_name(selected_strategy, strategy_catalog),
             _workflow_browser_label(workflow_key),
             selected_category,
             selected_dataset,
@@ -3809,6 +4573,8 @@ def _render_walkforward_workbook_summary(run_dir: Path) -> None:
     profitable_pct = summary_data.get("profitable_pct", float("nan"))
     top2_share_pct = summary_data.get("top2_share_pct", float("nan"))
 
+    _render_walkforward_workbook_review(summary)
+
     decision = _classify_walkforward_decision(
         segments=segment_count,
         profitable_oos_pct=profitable_pct,
@@ -3816,7 +4582,6 @@ def _render_walkforward_workbook_summary(run_dir: Path) -> None:
     )
     _render_decision_badge("Walk-forward OOS Survival + Concentration", decision)
 
-    st.markdown("**Walk-forward pass/fail thresholds (reference)**")
     threshold_df = pd.DataFrame(
         [
             {
@@ -3842,7 +4607,46 @@ def _render_walkforward_workbook_summary(run_dir: Path) -> None:
             },
         ]
     )
-    st.dataframe(threshold_df, use_container_width=True, hide_index=True)
+    st.markdown("**Secondary diagnostics**")
+    _render_verdict_dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Metric": row["Metric"],
+                    "Actual": row["Actual"],
+                    "Pass Criteria": row["PASS"],
+                    "Retry": row["RETRY"],
+                    "Fail": row["FAIL"],
+                    "Verdict": (
+                        "PASS"
+                        if row["Metric"] == "ProfitableOOS %" and np.isfinite(profitable_pct) and profitable_pct >= 60.0
+                        else (
+                            "RETRY"
+                            if row["Metric"] == "ProfitableOOS %" and np.isfinite(profitable_pct) and profitable_pct >= 50.0
+                            else (
+                                "FAIL"
+                                if row["Metric"] == "ProfitableOOS %"
+                                else (
+                                    "PASS"
+                                    if row["Metric"] == "Top2Share %" and np.isfinite(top2_share_pct) and top2_share_pct <= 50.0
+                                    else (
+                                        "RETRY"
+                                        if row["Metric"] == "Top2Share %" and np.isfinite(top2_share_pct) and top2_share_pct <= 60.0
+                                        else (
+                                            "FAIL"
+                                            if row["Metric"] == "Top2Share %"
+                                            else ("PASS" if segment_count >= 8 else "FAIL")
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    ),
+                }
+                for _, row in threshold_df.iterrows()
+            ]
+        )
+    )
 
     wfe = summary.get("wfe", {})
     if isinstance(wfe, dict) and wfe:
@@ -4312,112 +5116,443 @@ def main() -> None:
         t_limited, t_wf, t_mc = st.tabs(["Limited tests", "Walk-forward", "Monte Carlo"])
 
         with t_wf:
-            strategy_names = sorted(strategy_catalog.keys())
+            strategy_names = _sorted_strategy_keys(strategy_catalog)
             default_strategy_idx = strategy_names.index("sma_cross_strategy") if "sma_cross_strategy" in strategy_names else 0
-            strategy = st.selectbox("Strategy", strategy_names, index=default_strategy_idx, key="wf_strategy")
+            st.subheader("2) Strategy + Dataset")
+            setup_left, setup_right = st.columns([0.9, 1.1], gap="large")
+            with setup_left:
+                strategy = st.selectbox(
+                    "Strategy",
+                    strategy_names,
+                    index=default_strategy_idx,
+                    key="wf_strategy",
+                    format_func=lambda key: _strategy_display_name(key, strategy_catalog),
+                )
+                st.markdown(_reference_link("View strategy config", "strategy", strategy))
+            with setup_right:
+                dataset_options = [_rel(p) for p in data_files]
+                dataset = _select_path_from_options("Dataset CSV", dataset_options, wb_dataset, key_prefix="wf_dataset")
+                st.caption(f"Dataset comes from the page-level selector: `{dataset}`")
+
             info = strategy_catalog.get(strategy, {})
-            st.markdown(_reference_link("View strategy config", "strategy", strategy))
-
-            dataset_options = [_rel(p) for p in data_files]
-            dataset = _select_path_from_options("Dataset CSV", dataset_options, wb_dataset, key_prefix="wf_dataset")
-
-            c1, c2, c3, c4 = st.columns(4)
-            optimizer = c1.selectbox("Optimizer", ("grid", "optuna"))
-            optimization_mode = c2.selectbox(
-                "Optimization mode",
-                ("peak", "stability_robustness"),
-                help="`stability_robustness` emphasizes parameter stability, WFE, and anti-outlier filters.",
+            strategy_cfg = info.get("strategy_config", {}) if isinstance(info.get("strategy_config"), dict) else {}
+            params_defaults = copy.deepcopy(info.get("params_defaults", {}) or {})
+            raw_param_space = copy.deepcopy(info.get("param_space", {}) or {})
+            wf_param_contract = _build_strategy_walkforward_param_contract(
+                strategy_cfg,
+                params_defaults=params_defaults,
+                raw_param_space=raw_param_space,
             )
-            selection_mode = c3.selectbox("Selection mode", ("peak", "plateau"))
-            direction = c4.selectbox("Direction", ("maximize", "minimize"))
 
-            c5, c6 = st.columns(2)
-            objective_choice = c5.selectbox("Objective", [*COMMON_WF_OBJECTIVES, "profit_factor", "custom..."])
-            if objective_choice == "custom...":
-                objective = c5.text_input("Custom objective", value="return_on_account", key="wf_custom_objective")
+            ts_col_default = str(st.session_state.get("wf_ts_col", "timestamp") or "timestamp").strip() or "timestamp"
+            bounds = _dataset_timestamp_bounds(dataset, ts_col_default)
+            min_window_date = bounds.get("min_date") or date(2010, 1, 1)
+            max_window_date = bounds.get("max_date") or min_window_date
+            window_sig = f"{dataset}|{ts_col_default}|{min_window_date}|{max_window_date}"
+            if st.session_state.get("_wf_window_sig") != window_sig:
+                st.session_state["_wf_window_sig"] = window_sig
+                st.session_state["wf_window_start_date"] = min_window_date
+                st.session_state["wf_window_end_date"] = max_window_date
+
+            st.subheader("3) Workbook Inputs")
+            st.caption("The main WFA form follows the workbook fields. Lower-level optimizer and execution controls are below in Advanced.")
+
+            if bounds.get("ok", False):
+                st.caption(f"Detected dataset window: {min_window_date.isoformat()} to {max_window_date.isoformat()}")
+            elif bounds.get("min_date") is not None and bounds.get("max_date") is not None:
+                st.warning(
+                    f"Timestamp parsing from `{ts_col_default}` failed; using dataset metadata bounds instead. "
+                    f"Details: {bounds.get('error', 'unknown error')}"
+                )
             else:
-                objective = objective_choice
-
-            wfe_metric_choice = c6.selectbox(
-                "WFE metric",
-                [*COMMON_WF_OBJECTIVES, "profit_factor", "custom..."],
-                index=1 if "total_return_%" in COMMON_WF_OBJECTIVES else 0,
-            )
-            if wfe_metric_choice == "custom...":
-                wfe_metric = c6.text_input("Custom WFE metric", value="total_return_%", key="wf_custom_wfe_metric")
-            else:
-                wfe_metric = wfe_metric_choice
-
-            c7, c8, c9 = st.columns(3)
-            is_bars = int(c7.number_input("IS bars", min_value=1, value=18000, step=100))
-            oos_bars = int(c8.number_input("OOS bars", min_value=1, value=6000, step=100))
-            step_bars = int(c9.number_input("Step bars (0 => default)", min_value=0, value=6000, step=100))
-
-            c10, c11, c12 = st.columns(3)
-            min_trades = int(c10.number_input("Min trades (fallback)", min_value=0, value=30, step=1, key="wf_min_trades"))
-            min_is_trades = int(c11.number_input("Min IS trades", min_value=0, value=30, step=1, key="wf_min_is_trades"))
-            min_oos_trades = int(c12.number_input("Min OOS trades", min_value=0, value=30, step=1, key="wf_min_oos_trades"))
-
-            c13, c14, c15 = st.columns(3)
-            wfe_min_pct = float(c13.number_input("WFE min %", min_value=0.0, value=0.0, step=1.0, format="%.1f"))
-            max_top_trade_share = float(
-                c14.number_input("Max top trade share", min_value=0.01, max_value=1.0, value=1.0, step=0.01, format="%.2f")
-            )
-            plateau_min_neighbors = int(c15.number_input("Plateau min neighbors", min_value=0, value=3, step=1))
-
-            c16, c17, c18 = st.columns(3)
-            plateau_stability_penalty = float(
-                c16.number_input("Plateau stability penalty", min_value=0.0, value=0.5, step=0.1, format="%.2f")
-            )
-            progress_every = int(c17.number_input("Progress every", min_value=1, value=20, step=1, key="wf_progress_every"))
-            run_base = c18.text_input("Run base", value="runs")
-
-            c19, c20, c21 = st.columns(3)
-            n_trials = int(c19.number_input("Optuna n-trials", min_value=1, value=200, step=1))
-            timeout_s = int(c20.number_input("Optuna timeout (sec)", min_value=0, value=0, step=10))
-            sampler = c21.selectbox("Sampler", ("tpe", "random"))
-
-            c22, c23, c24 = st.columns(3)
-            seed = int(c22.number_input("Seed", min_value=0, value=42, step=1, key="wf_seed"))
-            anchored_mode = c23.selectbox("Window mode", ("Anchored", "Unanchored"))
-            ts_col = c24.text_input("Timestamp column", value="timestamp")
-
-            c25, c26, c27 = st.columns(3)
-            initial_equity = float(c25.number_input("Initial equity", min_value=0.0, value=100000.0, step=1000.0))
-            risk_pct = float(c26.number_input("Risk %", min_value=0.0, value=0.01, step=0.001, format="%.4f"))
-            spread_pips = float(c27.number_input("Spread pips (required)", min_value=0.0, value=0.2, step=0.1))
-
-            c28, c29, c30 = st.columns(3)
-            pip_size = float(c28.number_input("Pip size", min_value=0.0, value=0.0001, format="%.6f"))
-            margin_rate = float(c29.number_input("Margin rate", min_value=0.0, value=0.0, step=0.001, format="%.4f"))
-            lot_size = float(c30.number_input("Lot size", min_value=1.0, value=100000.0, step=1000.0))
-
-            c31, c32, c33 = st.columns(3)
-            commission_rt = float(c31.number_input("Commission RT (required)", value=5.0, step=0.5))
-            required_margin_abs = c32.text_input("Required margin abs (optional)", value="")
-            extra_args = c33.text_input("Extra args (optional)", value="", key="wf_extra_args")
-
-            c34, c35, c36 = st.columns(3)
-            baseline_full_data = c34.checkbox("Run baseline full-data compare", value=True)
-            compound_oos = c35.checkbox("Compound OOS equity", value=True)
-            conservative_same_bar = c36.checkbox("Conservative same-bar handling", value=False)
-            if optimization_mode == "stability_robustness":
-                st.caption(
-                    "stability_robustness mode enforces stricter floors: "
-                    "min IS/OOS trades >= 50, WFE >= 50%, top-trade-share <= 0.30."
+                st.error(
+                    f"Unable to determine WFA date bounds from dataset `{dataset}` using timestamp column `{ts_col_default}`."
                 )
 
-            default_param_space = info.get("param_space", {})
-            use_param_space_override = st.checkbox("Use PARAM_SPACE override (--param-space)", value=False)
-            param_space_text = st.text_area(
-                "Param space JSON (prepopulated from strategy)",
-                value=_json_pretty(default_param_space),
-                height=160,
-                key=f"wf_param_space_{strategy}",
+            window_cols = st.columns(2)
+            start_date = window_cols[0].date_input(
+                "WFA data start",
+                min_value=min_window_date,
+                max_value=max_window_date,
+                key="wf_window_start_date",
+            )
+            end_date = window_cols[1].date_input(
+                "WFA data end",
+                min_value=min_window_date,
+                max_value=max_window_date,
+                key="wf_window_end_date",
+            )
+
+            config_cols = st.columns(4)
+            anchored_mode = config_cols[0].selectbox(
+                "Anchored / unanchored",
+                options=("unanchored", "anchored"),
+                index=0,
+                key="wf_window_mode",
+            )
+            in_period_years = float(
+                config_cols[1].number_input(
+                    "In-period years",
+                    min_value=0.25,
+                    value=4.0,
+                    step=0.25,
+                    format="%.2f",
+                    key="wf_in_period_years",
+                )
+            )
+            out_period_years = float(
+                config_cols[2].number_input(
+                    "Out-period years",
+                    min_value=0.25,
+                    value=1.0,
+                    step=0.25,
+                    format="%.2f",
+                    key="wf_out_period_years",
+                )
+            )
+            fitness_factor_label = config_cols[3].selectbox(
+                "Fitness factor",
+                options=list(WFA_FITNESS_FACTOR_PRESETS.keys()),
+                index=0,
+                key="wf_fitness_factor_label",
+            )
+            fitness_factor_cfg = dict(WFA_FITNESS_FACTOR_PRESETS.get(fitness_factor_label, {}))
+            objective = str(fitness_factor_cfg.get("objective", "net_profit_abs") or "net_profit_abs")
+            direction = str(fitness_factor_cfg.get("direction", "maximize") or "maximize")
+
+            cost_cols = st.columns(2)
+            spread_pips = float(
+                cost_cols[0].number_input(
+                    "Slippage / spread (pips)",
+                    min_value=0.0,
+                    value=0.2,
+                    step=0.1,
+                    key="wf_spread_pips",
+                )
+            )
+            commission_rt = float(
+                cost_cols[1].number_input(
+                    "Commissions (round trip)",
+                    min_value=0.0,
+                    value=5.0,
+                    step=0.5,
+                    key="wf_commission_rt",
+                )
+            )
+
+            window_error = ""
+            window_info: dict[str, Any] | None = None
+            is_bars = 0
+            oos_bars = 0
+            try:
+                window_info = _walkforward_window_from_dates(
+                    bounds=bounds,
+                    start_value=start_date,
+                    end_value=end_date,
+                )
+                bars_per_year = float(window_info.get("bars_per_year", float("nan")))
+                if not math.isfinite(bars_per_year) or bars_per_year <= 0:
+                    raise ValueError("Unable to derive bars per year from the selected WFA data window.")
+                is_bars = max(1, int(round(float(in_period_years) * bars_per_year)))
+                oos_bars = max(1, int(round(float(out_period_years) * bars_per_year)))
+            except Exception as e:
+                window_error = str(e)
+                st.error(window_error)
+
+            step_bars_override = 0
+            effective_step_bars = oos_bars
+            estimated_folds = 0
+            if window_info is not None and not window_error:
+                selected_rows = int(window_info.get("selected_rows", 0) or 0)
+                effective_step_bars = max(1, oos_bars)
+                if selected_rows >= (is_bars + oos_bars):
+                    estimated_folds = 1 + max(0, int((selected_rows - is_bars - oos_bars) // effective_step_bars))
+                _render_metric_row(
+                    [
+                        ("Selected rows", selected_rows, "{:,.0f}"),
+                        ("Bars / year", float(window_info.get("bars_per_year", float("nan"))), "{:,.0f}"),
+                        ("IS bars", is_bars, "{:,.0f}"),
+                        ("OOS bars", oos_bars, "{:,.0f}"),
+                        ("Estimated folds", estimated_folds, "{:,.0f}"),
+                    ]
+                )
+
+            st.subheader("Baseline entry / exit param set")
+            wf_param_checks: list[tuple[bool, str, str]] = []
+            wf_param_space_obj = copy.deepcopy(wf_param_contract.get("default_param_space", {}) or {})
+
+            if wf_param_contract.get("has_policy", False):
+                sections = dict(wf_param_contract.get("sections", {}))
+                entry_section = sections.get("entry", {})
+                exit_section = sections.get("exit", {})
+                entry_has_content = bool(entry_section.get("editable_specs") or entry_section.get("fixed_params"))
+                exit_has_content = bool(exit_section.get("editable_specs") or exit_section.get("fixed_params"))
+
+                if entry_has_content or exit_has_content:
+                    param_cols = st.columns(2, gap="large")
+                    with param_cols[0]:
+                        if entry_has_content:
+                            wf_param_space_obj = _render_walkforward_param_policy_section(
+                                title="Baseline entry param set",
+                                section_contract=entry_section,
+                                param_space=wf_param_space_obj,
+                                widget_prefix=f"wf_param_entry_{strategy}",
+                                checks=wf_param_checks,
+                            )
+                        else:
+                            st.markdown("**Baseline entry param set**")
+                            st.caption("No strategy-defined entry parameters are configurable for walk-forward.")
+                    with param_cols[1]:
+                        if exit_has_content:
+                            wf_param_space_obj = _render_walkforward_param_policy_section(
+                                title="Baseline exit param set",
+                                section_contract=exit_section,
+                                param_space=wf_param_space_obj,
+                                widget_prefix=f"wf_param_exit_{strategy}",
+                                checks=wf_param_checks,
+                            )
+                        else:
+                            st.markdown("**Baseline exit param set**")
+                            st.caption("No strategy-defined exit parameters are configurable for walk-forward.")
+                else:
+                    fallback_section = sections.get("strategy", {})
+                    wf_param_space_obj = _render_walkforward_param_policy_section(
+                        title="Baseline strategy parameter set",
+                        section_contract=fallback_section,
+                        param_space=wf_param_space_obj,
+                        widget_prefix=f"wf_param_strategy_{strategy}",
+                        checks=wf_param_checks,
+                    )
+            else:
+                st.info(
+                    "This strategy does not define structured walk-forward optimisation metadata. "
+                    "Use the advanced JSON override below."
+                )
+
+            generated_param_space_text = _json_pretty(wf_param_space_obj)
+            with st.expander("Advanced param-space override", expanded=False):
+                use_param_space_override = st.checkbox(
+                    "Use custom param-space JSON instead of the structured fields above",
+                    value=False,
+                    key=f"wf_use_param_space_override_{strategy}",
+                )
+                if use_param_space_override:
+                    _sync_widget_from_source(f"wf_param_space_override_{strategy}", generated_param_space_text)
+                    param_space_text = st.text_area(
+                        "Custom param space JSON",
+                        height=180,
+                        key=f"wf_param_space_override_{strategy}",
+                    )
+                else:
+                    param_space_text = generated_param_space_text
+                    st.code(generated_param_space_text, language="json")
+
+            st.subheader("4) Workbook Outputs + Pass Criteria")
+            review_defaults = copy.deepcopy(WFA_WORKBOOK_REVIEW_ROWS)
+            review_seed_rows = copy.deepcopy(st.session_state.get("wf_workbook_review_rows", []))
+            if not review_seed_rows:
+                review_seed_rows = copy.deepcopy(review_defaults)
+            review_header_cols = st.columns([0.78, 0.22])
+            with review_header_cols[0]:
+                st.caption("Workbook-aligned review checklist. Edit outputs or review thresholds here if this run needs a different checklist.")
+            with review_header_cols[1]:
+                if st.button("Reset to workbook defaults", key="wf_workbook_review_reset"):
+                    st.session_state["wf_workbook_review_rows"] = copy.deepcopy(review_defaults)
+                    st.session_state.pop("wf_workbook_review_rows_editor", None)
+                    st.rerun()
+
+            review_editor_df = st.data_editor(
+                pd.DataFrame(review_seed_rows, columns=["output", "pass_criteria"]),
+                key="wf_workbook_review_rows_editor",
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                column_config={
+                    "output": st.column_config.TextColumn("Output", width="large"),
+                    "pass_criteria": st.column_config.TextColumn("Pass criteria", width="large"),
+                },
+            )
+            wf_workbook_review_rows = [
+                {
+                    "output": str(row.get("output", "") or "").strip(),
+                    "pass_criteria": str(row.get("pass_criteria", "") or "").strip(),
+                }
+                for row in review_editor_df.to_dict("records")
+                if str(row.get("output", "") or "").strip() or str(row.get("pass_criteria", "") or "").strip()
+            ]
+            st.session_state["wf_workbook_review_rows"] = wf_workbook_review_rows
+
+            st.subheader("5) Advanced / technical overrides")
+            with st.expander("Advanced / technical overrides", expanded=False):
+                c1, c2, c3, c4 = st.columns(4)
+                optimizer = c1.selectbox("Optimizer", ("grid", "optuna"), key="wf_optimizer")
+                optimization_mode = c2.selectbox(
+                    "Optimization mode",
+                    ("peak", "stability_robustness"),
+                    key="wf_optimization_mode",
+                    help="`stability_robustness` emphasizes parameter stability, WFE, and anti-outlier filters.",
+                )
+                selection_mode = c3.selectbox("Selection mode", ("peak", "plateau"), key="wf_selection_mode")
+                sampler = c4.selectbox("Sampler", ("tpe", "random"), key="wf_sampler")
+
+                c5, c6, c7, c8 = st.columns(4)
+                use_objective_override = c5.checkbox(
+                    "Override fitness objective",
+                    value=False,
+                    key="wf_use_objective_override",
+                )
+                objective_choice = c6.selectbox(
+                    "Objective",
+                    [*COMMON_WF_OBJECTIVES, "profit_factor", "custom..."],
+                    key="wf_objective_choice",
+                    disabled=not use_objective_override,
+                )
+                if use_objective_override and objective_choice == "custom...":
+                    objective = c6.text_input("Custom objective", value="return_on_account", key="wf_custom_objective")
+                elif use_objective_override:
+                    objective = objective_choice
+                c7.caption(f"Fitness preset objective: `{fitness_factor_label}` -> `{objective}`")
+                if use_objective_override:
+                    direction = c8.selectbox("Direction", ("maximize", "minimize"), key="wf_direction")
+                else:
+                    c8.caption(f"Direction from fitness preset: `{direction}`")
+
+                c9, c10, c11, c12 = st.columns(4)
+                wfe_metric_choice = c9.selectbox(
+                    "WFE metric",
+                    [*COMMON_WF_OBJECTIVES, "profit_factor", "custom..."],
+                    index=1 if "total_return_%" in COMMON_WF_OBJECTIVES else 0,
+                    key="wf_wfe_metric_choice",
+                )
+                if wfe_metric_choice == "custom...":
+                    wfe_metric = c9.text_input("Custom WFE metric", value="total_return_%", key="wf_custom_wfe_metric")
+                else:
+                    wfe_metric = wfe_metric_choice
+                step_bars_override = int(
+                    c10.number_input(
+                        "Step bars override (0 = out-period bars)",
+                        min_value=0,
+                        value=0,
+                        step=100,
+                        key="wf_step_bars_override",
+                    )
+                )
+                run_base = c11.text_input("Run base", value="runs", key="wf_run_base")
+                ts_col = c12.text_input("Timestamp column", value=ts_col_default, key="wf_ts_col")
+
+                c13, c14, c15 = st.columns(3)
+                min_trades = int(c13.number_input("Min trades (fallback)", min_value=0, value=30, step=1, key="wf_min_trades"))
+                min_is_trades = int(c14.number_input("Min IS trades", min_value=0, value=30, step=1, key="wf_min_is_trades"))
+                min_oos_trades = int(c15.number_input("Min OOS trades", min_value=0, value=30, step=1, key="wf_min_oos_trades"))
+
+                c16, c17, c18 = st.columns(3)
+                wfe_min_pct = float(c16.number_input("WFE min %", min_value=0.0, value=0.0, step=1.0, format="%.1f", key="wf_wfe_min_pct"))
+                max_top_trade_share = float(
+                    c17.number_input(
+                        "Max top trade share",
+                        min_value=0.01,
+                        max_value=1.0,
+                        value=1.0,
+                        step=0.01,
+                        format="%.2f",
+                        key="wf_max_top_trade_share",
+                    )
+                )
+                plateau_min_neighbors = int(
+                    c18.number_input("Plateau min neighbors", min_value=0, value=3, step=1, key="wf_plateau_min_neighbors")
+                )
+
+                c19, c20, c21 = st.columns(3)
+                plateau_stability_penalty = float(
+                    c19.number_input(
+                        "Plateau stability penalty",
+                        min_value=0.0,
+                        value=0.5,
+                        step=0.1,
+                        format="%.2f",
+                        key="wf_plateau_stability_penalty",
+                    )
+                )
+                progress_every = int(
+                    c20.number_input("Progress every", min_value=1, value=20, step=1, key="wf_progress_every")
+                )
+                seed = int(c21.number_input("Seed", min_value=0, value=42, step=1, key="wf_seed"))
+
+                c22, c23, c24 = st.columns(3)
+                initial_equity = float(
+                    c22.number_input("Initial equity", min_value=0.0, value=100000.0, step=1000.0, key="wf_initial_equity")
+                )
+                risk_pct = float(
+                    c23.number_input("Risk %", min_value=0.0, value=0.01, step=0.001, format="%.4f", key="wf_risk_pct")
+                )
+                pip_size = float(
+                    c24.number_input("Pip size", min_value=0.0, value=0.0001, format="%.6f", key="wf_pip_size")
+                )
+
+                c25, c26, c27 = st.columns(3)
+                margin_rate = float(
+                    c25.number_input("Margin rate", min_value=0.0, value=0.0, step=0.001, format="%.4f", key="wf_margin_rate")
+                )
+                lot_size = float(
+                    c26.number_input("Lot size", min_value=1.0, value=100000.0, step=1000.0, key="wf_lot_size")
+                )
+                required_margin_abs = c27.text_input("Required margin abs (optional)", value="", key="wf_required_margin_abs")
+
+                c28, c29, c30 = st.columns(3)
+                n_trials = int(c28.number_input("Optuna n-trials", min_value=1, value=200, step=1, key="wf_n_trials"))
+                timeout_s = int(c29.number_input("Optuna timeout (sec)", min_value=0, value=0, step=10, key="wf_timeout_s"))
+                extra_args = c30.text_input("Extra args (optional)", value="", key="wf_extra_args")
+
+                c31, c32, c33 = st.columns(3)
+                baseline_full_data = c31.checkbox("Run baseline full-data compare", value=True, key="wf_baseline_full_data")
+                compound_oos = c32.checkbox("Compound OOS equity", value=True, key="wf_compound_oos")
+                conservative_same_bar = c33.checkbox(
+                    "Conservative same-bar handling",
+                    value=False,
+                    key="wf_conservative_same_bar",
+                )
+                if optimization_mode == "stability_robustness":
+                    st.caption(
+                        "stability_robustness mode enforces stricter floors: "
+                        "min IS/OOS trades >= 50, WFE >= 50%, top-trade-share <= 0.30."
+                    )
+
+            effective_step_bars = max(1, step_bars_override or oos_bars or 1)
+            if window_info is not None and not window_error:
+                selected_rows = int(window_info.get("selected_rows", 0) or 0)
+                if selected_rows >= (is_bars + oos_bars):
+                    estimated_folds = 1 + max(0, int((selected_rows - is_bars - oos_bars) // effective_step_bars))
+                else:
+                    estimated_folds = 0
+
+            st.subheader("6) Run")
+            _render_metric_row(
+                [
+                    ("Strategy", _strategy_display_name(strategy, strategy_catalog), "{}"),
+                    ("Fitness factor", fitness_factor_label, "{}"),
+                    ("Objective", objective, "{}"),
+                    ("Step bars", effective_step_bars, "{:,.0f}"),
+                    ("Estimated folds", estimated_folds, "{:,.0f}"),
+                ]
             )
 
             if st.button("Run walk-forward", type="primary"):
                 try:
+                    if window_error:
+                        raise ValueError(window_error)
+                    failed_param_checks = [item for item in wf_param_checks if not bool(item[0])]
+                    if use_param_space_override:
+                        custom_param_space = json.loads(str(param_space_text or "").strip() or "{}")
+                        if not isinstance(custom_param_space, dict):
+                            raise ValueError("Custom param space JSON must be an object.")
+                        param_space_payload = json.dumps(custom_param_space, sort_keys=True, separators=(",", ":"), default=str)
+                    else:
+                        if failed_param_checks:
+                            first_bad = failed_param_checks[0]
+                            raise ValueError(f"Invalid walk-forward param space: {first_bad[1]} ({first_bad[2]})")
+                        param_space_payload = json.dumps(wf_param_space_obj, sort_keys=True, separators=(",", ":"), default=str)
+                    if window_info is None:
+                        raise ValueError("WFA data window is not valid.")
                     cmd = [
                         SCRIPT_PYTHON,
                         str(SCRIPTS_DIR / "run_walkforward.py"),
@@ -4459,6 +5594,10 @@ def main() -> None:
                         str(is_bars),
                         "--oos-bars",
                         str(oos_bars),
+                        "--start-bar",
+                        str(int(window_info.get("start_bar", 0) or 0)),
+                        "--end-bar",
+                        str(int(window_info.get("end_bar", 0) or 0)),
                         "--n-trials",
                         str(n_trials),
                         "--timeout-s",
@@ -4484,14 +5623,15 @@ def main() -> None:
                         "--margin-rate",
                         str(margin_rate),
                     ]
-                    if anchored_mode == "Unanchored":
+                    if anchored_mode == "unanchored":
                         cmd.append("--unanchored")
-                    if step_bars > 0:
-                        cmd.extend(["--step-bars", str(step_bars)])
+                    else:
+                        cmd.append("--anchored")
+                    if effective_step_bars > 0:
+                        cmd.extend(["--step-bars", str(effective_step_bars)])
                     if required_margin_abs.strip():
                         cmd.extend(["--required-margin-abs", required_margin_abs.strip()])
-                    if use_param_space_override:
-                        cmd.extend(["--param-space", param_space_text.strip()])
+                    cmd.extend(["--param-space", param_space_payload])
                     if not baseline_full_data:
                         cmd.append("--no-baseline-full-data")
                     if not compound_oos:
@@ -4523,38 +5663,205 @@ def main() -> None:
         with t_mc:
             walk_run_options = [p.as_posix() for p in walk_runs]
             default_walk_run = st.session_state["last_walkforward_run"] or (walk_run_options[0] if walk_run_options else "runs/strategies/.../walkforward/...")
+            st.subheader("2) Parent Walk-Forward Run")
             run_dir = _select_path_from_options(
-                "Walk-forward run directory",
+                "Walk-forward run used",
                 walk_run_options,
                 default_walk_run,
                 key_prefix="mc_run_dir",
             )
+            mc_parent_run_dir = _abs_path(run_dir) if str(run_dir or "").strip() else None
+            mc_parent_spec: dict[str, Any] = {}
+            if mc_parent_run_dir is not None:
+                mc_spec_path = spec_path(mc_parent_run_dir)
+                if mc_spec_path.exists():
+                    mc_parent_spec = _read_json(mc_spec_path)
+            mc_initial_equity = _infer_initial_equity_from_spec(mc_parent_spec)
+            mc_parent_ctx = _estimate_montecarlo_parent_context(mc_parent_run_dir)
+            estimated_trades_per_year = _as_float(mc_parent_ctx.get("estimated_trades_per_year"))
+            trade_pool_count = int(mc_parent_ctx.get("trade_pool_count", 0) or 0)
+            historical_years = _as_float(mc_parent_ctx.get("historical_years"))
+            n_trades_default = int(round(estimated_trades_per_year)) if np.isfinite(estimated_trades_per_year) and estimated_trades_per_year > 0 else max(1, trade_pool_count)
 
+            st.subheader("3) Core Monte Carlo Inputs")
             c1, c2, c3 = st.columns(3)
-            n_sims = int(c1.number_input("Number of simulations", min_value=1, value=8000, step=100))
-            ruin_equity = float(c2.number_input("Ruin equity", min_value=0.0, value=70000.0, step=500.0))
-            seed = int(c3.number_input("Seed", min_value=0, value=42, step=1, key="mc_seed"))
+            n_sims = int(
+                c1.number_input(
+                    "Number of simulations",
+                    min_value=1,
+                    value=8000,
+                    step=100,
+                    help="How many Monte Carlo equity paths to generate.",
+                )
+            )
+            ruin_equity = float(
+                c2.number_input(
+                    "Stop trading if equity drops below $",
+                    min_value=0.0,
+                    value=70000.0,
+                    step=500.0,
+                    help="A simulation counts as ruined once equity drops below this level.",
+                )
+            )
+            seed = int(
+                c3.number_input(
+                    "Seed (reproducibility)",
+                    min_value=0,
+                    value=42,
+                    step=1,
+                    key="mc_seed",
+                    help="Controls the random sampling. Same seed + same inputs gives the same Monte Carlo run.",
+                )
+            )
+            ruin_pct_of_start = float("nan")
+            if np.isfinite(mc_initial_equity) and mc_initial_equity > 0:
+                ruin_pct_of_start = float((ruin_equity / mc_initial_equity) * 100.0)
 
-            c4, c5, c6 = st.columns(3)
-            n_trades = c4.text_input("Trades per simulation (optional)", value="")
-            sample_with_replacement = c5.checkbox("Sample with replacement", value=True)
-            stop_at_ruin = c6.checkbox("Stop path at ruin", value=True)
+            _render_metric_row(
+                [
+                    ("Starting equity", f"${mc_initial_equity:,.2f}", "{}"),
+                    ("OOS trade pool", trade_pool_count, "{:,.0f}"),
+                    ("OOS history years", "n/a" if not np.isfinite(historical_years) else f"{historical_years:.2f}", "{}"),
+                    (
+                        "Est trades / year",
+                        "n/a" if not np.isfinite(estimated_trades_per_year) else f"{estimated_trades_per_year:.0f}",
+                        "{}",
+                    ),
+                    ("Ruin threshold", f"${ruin_equity:,.2f}", "{}"),
+                ]
+            )
+            st.caption(
+                "Starting equity is inherited from the selected walk-forward run. "
+                "Monte Carlo does not choose a separate starting balance."
+            )
+            st.caption(
+                "The trade-pool estimate comes from the parent walk-forward OOS trades. "
+                "A common default is to simulate about one year of trades."
+            )
 
-            c7, c8, c9 = st.columns(3)
-            pnl_mode = c7.selectbox("PnL mode", ("actual", "fixed_risk"))
-            fixed_risk_dollars = c8.text_input("Fixed risk dollars (required if fixed_risk)", value="")
-            progress_every = int(c9.number_input("Progress every", min_value=1, value=200, step=10, key="mc_progress_every"))
+            core_cols = st.columns(2)
+            n_trades_value = int(
+                core_cols[0].number_input(
+                    "Trades per simulation (~1 year)",
+                    min_value=1,
+                    value=max(1, n_trades_default),
+                    step=1,
+                    key="mc_n_trades_value",
+                    help="Defaults to the estimated number of trades per year from the selected WFA run. Increase it to simulate a longer horizon.",
+                )
+            )
+            core_cols[1].markdown(
+                f"**Ruin threshold % of start**\n\n"
+                + ("`n/a`" if not np.isfinite(ruin_pct_of_start) else f"`{ruin_pct_of_start:.2f}%`")
+            )
 
-            c10, c11, c12 = st.columns(3)
-            sample_paths = int(c10.number_input("Saved sample paths", min_value=0, value=120, step=10))
-            save_quantiles = c11.checkbox("Save quantile paths", value=True)
-            extra_args = c12.text_input("Extra args (optional)", value="", key="mc_extra_args")
+            st.subheader("4) Workbook Outputs + Pass Criteria")
+            threshold_cols = st.columns(4)
+            tor_max = float(
+                threshold_cols[0].number_input(
+                    "Max risk of ruin %",
+                    value=10.0,
+                    step=0.5,
+                    help="Acceptance threshold for the % of simulations that breach the ruin threshold.",
+                )
+            )
+            mdd_max = float(
+                threshold_cols[1].number_input(
+                    "Max median DD %",
+                    value=40.0,
+                    step=0.5,
+                    help="Acceptance threshold for the median simulated max drawdown.",
+                )
+            )
+            ret_min = float(
+                threshold_cols[2].number_input(
+                    "Min median return %",
+                    value=40.0,
+                    step=0.5,
+                    help="Acceptance threshold for the median simulated return.",
+                )
+            )
+            ratio_min = float(
+                threshold_cols[3].number_input(
+                    "Min return / DD ratio",
+                    value=2.0,
+                    step=0.1,
+                    help="Acceptance threshold for return-to-drawdown ratio.",
+                )
+            )
 
-            c13, c14, c15, c16 = st.columns(4)
-            tor_max = float(c13.number_input("Max risk of ruin %", value=10.0, step=0.5))
-            mdd_max = float(c14.number_input("Max median DD %", value=40.0, step=0.5))
-            ret_min = float(c15.number_input("Min median return %", value=40.0, step=0.5))
-            ratio_min = float(c16.number_input("Min return/DD ratio", value=2.0, step=0.1))
+            st.subheader("5) Advanced / technical overrides")
+            with st.expander("Advanced / technical overrides", expanded=False):
+                c4, c5, c6 = st.columns(3)
+                sample_with_replacement = c4.checkbox(
+                    "Sample with replacement",
+                    value=True,
+                    help="When enabled, the same historical trade can appear multiple times in one simulation. Disable to sample each trade at most once per path.",
+                )
+                stop_at_ruin = c5.checkbox(
+                    "Stop trading after ruin hit",
+                    value=True,
+                    help="If enabled, the equity path flatlines after the ruin threshold is breached instead of continuing to sample later trades.",
+                )
+                progress_every = int(
+                    c6.number_input(
+                        "Progress every",
+                        min_value=1,
+                        value=200,
+                        step=10,
+                        key="mc_progress_every",
+                        help="How often progress logs are printed during the run.",
+                    )
+                )
+
+                c7, c8, c9 = st.columns(3)
+                pnl_mode = c7.selectbox(
+                    "Trade outcome sizing mode",
+                    ("actual", "fixed_risk"),
+                    format_func=lambda mode: (
+                        "Use real OOS trade $PnL"
+                        if mode == "actual"
+                        else "Normalize each trade to fixed $ risk"
+                    ),
+                    help=(
+                        "`actual` uses the real dollar PnL from each OOS trade. "
+                        "`fixed_risk` rescales each trade as r_multiple x fixed-risk dollars."
+                    ),
+                )
+                fixed_risk_dollars = c8.text_input(
+                    "Fixed-risk $ per trade",
+                    value="",
+                    help="Required only when trade outcome sizing mode is `fixed_risk`.",
+                )
+                extra_args = c9.text_input("Extra args (optional)", value="", key="mc_extra_args")
+
+                c10, c11 = st.columns(2)
+                sample_paths = int(
+                    c10.number_input(
+                        "Saved individual paths",
+                        min_value=0,
+                        value=120,
+                        step=10,
+                        help="How many individual simulation paths to save for later plotting/debugging.",
+                    )
+                )
+                save_quantiles = c11.checkbox(
+                    "Save percentile envelope paths (p05/p25/p50/p75/p95)",
+                    value=True,
+                    help="Saves percentile equity envelopes across all simulations for charting the Monte Carlo distribution.",
+                )
+
+                if pnl_mode == "actual":
+                    c7.caption("Each sampled trade keeps its original dollar PnL from the WFA OOS trade pool.")
+                else:
+                    c7.caption("Each sampled trade becomes `r_multiple x fixed-risk $ per trade`, so sizing is normalized.")
+                c10.caption("These are a small subset of full simulation paths, useful for inspection.")
+                c11.caption("These are summary curves across all simulations, useful for fan/envelope charts.")
+
+                st.caption(
+                    "Difference: `Ruin threshold equity` defines when an individual simulation is counted as ruined. "
+                    "`Max risk of ruin %` is the acceptance rule applied after all simulations finish."
+                )
 
             if st.button("Run Monte Carlo", type="primary"):
                 try:
@@ -4567,6 +5874,8 @@ def main() -> None:
                         run_dir,
                         "--n-sims",
                         str(n_sims),
+                        "--n-trades",
+                        str(int(n_trades_value)),
                         "--ruin-equity",
                         str(ruin_equity),
                         "--seed",
@@ -4586,8 +5895,6 @@ def main() -> None:
                         "--target-return-dd-ratio-min",
                         str(ratio_min),
                     ]
-                    if n_trades.strip():
-                        cmd.extend(["--n-trades", n_trades.strip()])
                     if sample_with_replacement:
                         cmd.append("--replace")
                     else:
@@ -4621,12 +5928,18 @@ def main() -> None:
                 _render_montecarlo_workbook_summary(_abs_path(last_mc))
 
         with t_limited:
-            strategy_names = sorted(strategy_catalog.keys())
+            strategy_names = _sorted_strategy_keys(strategy_catalog)
             default_strategy_idx = strategy_names.index("sma_cross_strategy") if "sma_cross_strategy" in strategy_names else 0
             st.subheader("2) Strategy + Scenario")
             setup_left, setup_right = st.columns([0.92, 1.08], gap="large")
             with setup_left:
-                strategy_short = st.selectbox("Strategy", strategy_names, index=default_strategy_idx, key="limited_strategy")
+                strategy_short = st.selectbox(
+                    "Strategy",
+                    strategy_names,
+                    index=default_strategy_idx,
+                    key="limited_strategy",
+                    format_func=lambda key: _strategy_display_name(key, strategy_catalog),
+                )
             strategy_module = f"quantbt.strategies.{strategy_short}"
             strategy_info = strategy_catalog.get(strategy_short, {})
             strategy_cfg = strategy_info.get("strategy_config", {})
@@ -6104,8 +7417,9 @@ def main() -> None:
                 except ValueError as e:
                     st.error(f"Invalid arguments: {e}")
                 else:
+                    strategy_label = _strategy_display_name(strategy_short, strategy_catalog)
                     st.info(
-                        f"Running `{selected_workbook_template}` on `{strategy_short}` using `{Path(data_path).name}`. "
+                        f"Running `{selected_workbook_template}` on `{strategy_label}` using `{Path(data_path).name}`. "
                         "Progress updates stream below."
                     )
                     rc, out = _run_cli_live(cmd, workflow="limited")

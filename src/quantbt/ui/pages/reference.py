@@ -161,12 +161,21 @@ def render_reference_page(
     )
 
     if section == "strategy":
-        names = sorted(strategy_catalog.keys())
+        names = sorted(
+            strategy_catalog.keys(),
+            key=lambda key: str(strategy_catalog.get(key, {}).get("display_name", key)).lower(),
+        )
         if not names:
             st.info("No strategies discovered.")
         else:
             idx = names.index(req_name) if req_type == "strategy" and req_name in names else 0
-            selected = st.selectbox("Strategy", names, index=idx, key="ref_strategy_select")
+            selected = st.selectbox(
+                "Strategy",
+                names,
+                index=idx,
+                key="ref_strategy_select",
+                format_func=lambda key: str(strategy_catalog.get(key, {}).get("display_name", key)),
+            )
             info = strategy_catalog[selected]
             strategy_cfg = info.get("strategy_config", {}) if isinstance(info.get("strategy_config"), dict) else {}
             entry_cfg = strategy_cfg.get("entry", {}) if isinstance(strategy_cfg, dict) else {}
