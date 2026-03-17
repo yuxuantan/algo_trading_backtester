@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quantbt.core.metrics import max_drawdown
+from quantbt.core.metrics import max_drawdown, profit_factor
 
 
 _SECONDS_PER_YEAR = 365.25 * 24.0 * 60.0 * 60.0
@@ -144,3 +144,69 @@ def common_performance_metrics(
         "max_drawdown_abs_%": float(mdd_abs_pct) if math.isfinite(mdd_abs_pct) else float("nan"),
         "mar": float(mar) if math.isfinite(mar) else float("nan"),
     }
+
+
+def build_backtest_summary(
+    *,
+    equity_like: pd.DataFrame | pd.Series | None,
+    trades_df: pd.DataFrame | None,
+    initial_equity: float,
+    include_common_metrics: bool = False,
+) -> dict[str, Any]:
+    eq = _as_equity_series(equity_like)
+    initial = float(initial_equity)
+
+    if eq.empty:
+        summary: dict[str, Any] = {
+            "trades": int(0 if trades_df is None else len(trades_df)),
+            "final_equity": initial,
+            "total_return_%": 0.0,
+            "max_drawdown_%": 0.0,
+            "win_rate_%": float("nan"),
+            "profit_factor": float("nan"),
+            "avg_R": float("nan"),
+        }
+        if include_common_metrics:
+            summary.update(
+                common_performance_metrics(
+                    equity_like=equity_like,
+                    trades_df=trades_df,
+                    initial_equity=initial,
+                )
+            )
+        return summary
+
+    final_equity = float(eq.iloc[-1])
+    total_return = (final_equity / initial) - 1.0 if initial > 0 else float("nan")
+    mdd = max_drawdown(eq)
+    pf = profit_factor(trades_df)
+    win_rate = float("nan")
+    avg_r = float("nan")
+    if trades_df is not None and not trades_df.empty:
+        if "pnl" in trades_df.columns:
+            pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            if not pnl.empty:
+                win_rate = float((pnl > 0).mean())
+        if "r_multiple" in trades_df.columns:
+            r = pd.to_numeric(trades_df["r_multiple"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            if not r.empty:
+                avg_r = float(r.mean())
+
+    summary = {
+        "trades": int(0 if trades_df is None else len(trades_df)),
+        "final_equity": final_equity,
+        "total_return_%": float(total_return * 100.0) if math.isfinite(total_return) else float("nan"),
+        "max_drawdown_%": float(mdd * 100.0) if math.isfinite(mdd) else float("nan"),
+        "win_rate_%": float(win_rate * 100.0) if math.isfinite(win_rate) else float("nan"),
+        "profit_factor": float(pf) if math.isfinite(pf) else (float("inf") if pf == float("inf") else float("nan")),
+        "avg_R": float(avg_r) if math.isfinite(avg_r) else float("nan"),
+    }
+    if include_common_metrics:
+        summary.update(
+            common_performance_metrics(
+                equity_like=equity_like,
+                trades_df=trades_df,
+                initial_equity=initial,
+            )
+        )
+    return summary

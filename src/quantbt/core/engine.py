@@ -2,8 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from quantbt.core.metrics import max_drawdown, profit_factor
-from quantbt.core.performance import common_performance_metrics
+from quantbt.core.performance import build_backtest_summary
+from quantbt.core.trades import close_trade_with_costs, resolve_intrabar_bracket_exit
 
 @dataclass(frozen=True)
 class BacktestConfig:
@@ -39,8 +39,6 @@ def run_backtest_sma_cross(
     trades = []
     pos = None
 
-    spread = cfg.spread_pips * cfg.pip_size
-
     for i in range(len(df)):
         t = idx[i]
         h = float(df.at[t, "high"])
@@ -49,67 +47,27 @@ def run_backtest_sma_cross(
         # ---- Manage open position ----
         if pos is not None:
             side = pos["side"]
-            entry = pos["entry"]
             sl = pos["sl"]
             tp = pos["tp"]
-            units = pos["units"]
-
-            if side == "long":
-                sl_hit = (l <= sl)
-                tp_hit = (h >= tp)
-            else:
-                sl_hit = (h >= sl)
-                tp_hit = (l <= tp)
-
-            exit_price = None
-            exit_reason = None
-
-            if sl_hit and tp_hit:
-                if cfg.conservative_same_bar:
-                    exit_price = sl
-                    exit_reason = "SL_and_TP_same_bar_assume_SL"
-                else:
-                    exit_price = tp
-                    exit_reason = "SL_and_TP_same_bar_assume_TP"
-            elif sl_hit:
-                exit_price = sl
-                exit_reason = "SL"
-            elif tp_hit:
-                exit_price = tp
-                exit_reason = "TP"
+            exit_price, exit_reason = resolve_intrabar_bracket_exit(
+                side=str(side),
+                bar_high=float(h),
+                bar_low=float(l),
+                sl=float(sl),
+                tp=float(tp),
+                conservative_same_bar=bool(cfg.conservative_same_bar),
+            )
 
             if exit_price is not None:
-                # simplified spread cost on entry+exit
-                commission = 0.0
-                if cfg.commission_per_round_trip and cfg.lot_size:
-                    commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
-
-                if side == "long":
-                    entry_eff = entry + spread / 2
-                    exit_eff = exit_price - spread / 2
-                    pnl = (exit_eff - entry_eff) * units - commission
-                else:
-                    entry_eff = entry - spread / 2
-                    exit_eff = exit_price + spread / 2
-                    pnl = (entry_eff - exit_eff) * units - commission
-
-                equity += pnl
-
-                trades.append({
-                    "entry_time": pos["entry_time"],
-                    "exit_time": t,
-                    "side": side,
-                    "entry": entry,
-                    "sl": sl,
-                    "tp": tp,
-                    "units": units,
-                    "exit": exit_price,
-                    "exit_reason": exit_reason,
-                    "pnl": pnl,
-                    "commission": commission,
-                    "equity_after": equity,
-                    "r_multiple": pnl / pos["risk_dollars"] if pos["risk_dollars"] > 0 else np.nan
-                })
+                equity, trade = close_trade_with_costs(
+                    pos=pos,
+                    exit_price=float(exit_price),
+                    exit_time=t,
+                    exit_reason=str(exit_reason),
+                    equity_now=float(equity),
+                    cfg=cfg,
+                )
+                trades.append(trade)
                 pos = None
 
         equity_curve.append({"time": t, "equity": equity})
@@ -159,26 +117,10 @@ def run_backtest_sma_cross(
     equity_df = pd.DataFrame(equity_curve).set_index("time")
     trades_df = pd.DataFrame(trades)
 
-    total_return = (equity_df["equity"].iloc[-1] / cfg.initial_equity) - 1.0
-    mdd = max_drawdown(equity_df["equity"])
-    pf = profit_factor(trades_df)
-    win_rate = float((trades_df["pnl"] > 0).mean()) if not trades_df.empty else np.nan
-    avg_r = float(trades_df["r_multiple"].mean()) if not trades_df.empty else np.nan
-
-    summary = {
-        "trades": int(len(trades_df)),
-        "final_equity": float(equity_df["equity"].iloc[-1]),
-        "total_return_%": float(total_return * 100),
-        "max_drawdown_%": float(mdd * 100),
-        "win_rate_%": float(win_rate * 100) if np.isfinite(win_rate) else np.nan,
-        "profit_factor": pf,
-        "avg_R": avg_r
-    }
-    summary.update(
-        common_performance_metrics(
-            equity_like=equity_df,
-            trades_df=trades_df,
-            initial_equity=float(cfg.initial_equity),
-        )
+    summary = build_backtest_summary(
+        equity_like=equity_df,
+        trades_df=trades_df,
+        initial_equity=float(cfg.initial_equity),
+        include_common_metrics=True,
     )
     return equity_df, trades_df, summary

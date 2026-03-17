@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from quantbt.core.metrics import max_drawdown
 from quantbt.core.performance import common_performance_metrics
+from quantbt.core.trades import close_trade_with_costs, resolve_intrabar_bracket_exit
 
 
 def run_backtest_limited(
@@ -28,8 +29,6 @@ def run_backtest_limited(
     idx = df.index.to_list()
 
     equity = float(cfg.initial_equity)
-    spread = float(cfg.spread_pips) * float(cfg.pip_size)
-
     equity_curve = []
     trades = []
 
@@ -54,19 +53,14 @@ def run_backtest_limited(
         i: int,
         equity_now: float,
     ) -> tuple[float, dict]:
-        commission = 0.0
-        if cfg.commission_per_round_trip and cfg.lot_size:
-            commission = (units / cfg.lot_size) * cfg.commission_per_round_trip
-        if side == "long":
-            entry_eff = entry + spread / 2
-            exit_eff = exit_price - spread / 2
-            pnl = (exit_eff - entry_eff) * units - commission
-        else:
-            entry_eff = entry - spread / 2
-            exit_eff = exit_price + spread / 2
-            pnl = (entry_eff - exit_eff) * units - commission
-
-        equity_after = equity_now + pnl
+        equity_after, trade = close_trade_with_costs(
+            pos=pos,
+            exit_price=float(exit_price),
+            exit_time=exit_time,
+            exit_reason=str(exit_reason),
+            equity_now=float(equity_now),
+            cfg=cfg,
+        )
 
         mfe = float(pos.get("mfe", 0.0))
         mae = float(pos.get("mae", 0.0))
@@ -75,34 +69,22 @@ def run_backtest_limited(
         mae_r = (mae / stop_dist) if stop_dist else np.nan
         mfe_dollars = mfe * units
         if mfe_dollars > 0:
-            realized = max(pnl, 0.0)
+            realized = max(float(trade["pnl"]), 0.0)
             giveback = (mfe_dollars - realized) / mfe_dollars
         else:
             giveback = np.nan
 
-        trade = {
-            "entry_time": pos["entry_time"],
-            "exit_time": exit_time,
+        trade.update({
             "bars_held": int(i - int(pos.get("entry_i", i))),
-            "side": side,
-            "entry": entry,
-            "exit": exit_price,
             # Persist realized bracket levels from the actual limited-test iteration.
             # For non-bracket exits (e.g. time-based), these remain NaN.
-            "sl": float(pos["sl"]) if "sl" in pos else np.nan,
-            "tp": float(pos["tp"]) if "tp" in pos else np.nan,
             "stop_dist": float(pos["stop_dist"]) if pos.get("stop_dist") is not None else np.nan,
-            "exit_reason": exit_reason,
-            "units": units,
-            "pnl": pnl,
-            "commission": commission,
             "mfe": mfe,
             "mae": mae,
             "mfe_R": mfe_r,
             "mae_R": mae_r,
             "giveback": giveback,
-            "equity_after": equity_after,
-        }
+        })
         return float(equity_after), trade
 
     for i in range(len(df)):
@@ -135,20 +117,16 @@ def run_backtest_limited(
             else:
                 sl = pos["sl"]
                 tp = pos["tp"]
-
-                sl_hit = (l <= sl) if side == "long" else (h >= sl)
-                tp_hit = (h >= tp) if side == "long" else (l <= tp)
-
-                if sl_hit and tp_hit:
-                    # conservative assume SL
-                    exit_price = sl if cfg.conservative_same_bar else tp
-                    exit_reason = "SL_and_TP_same_bar"
-                elif sl_hit:
-                    exit_price = sl
-                    exit_reason = "SL"
-                elif tp_hit:
-                    exit_price = tp
-                    exit_reason = "TP"
+                exit_price, exit_reason = resolve_intrabar_bracket_exit(
+                    side=str(side),
+                    bar_high=float(h),
+                    bar_low=float(l),
+                    sl=float(sl),
+                    tp=float(tp),
+                    conservative_same_bar=bool(cfg.conservative_same_bar),
+                    same_bar_sl_reason="SL_and_TP_same_bar",
+                    same_bar_tp_reason="SL_and_TP_same_bar",
+                )
 
             if exit_price is not None:
                 equity, trade = _close_trade(
@@ -263,20 +241,17 @@ def run_backtest_limited(
                     else:
                         pos["mfe"] = max(pos["mfe"], entry_open - l)
                         pos["mae"] = min(pos["mae"], entry_open - h)
-                        sl_hit = (h >= sl)
-                        tp_hit = (l <= tp)
 
-                    exit_price = None
-                    exit_reason = None
-                    if sl_hit and tp_hit:
-                        exit_price = sl if cfg.conservative_same_bar else tp
-                        exit_reason = "SL_and_TP_same_bar"
-                    elif sl_hit:
-                        exit_price = sl
-                        exit_reason = "SL"
-                    elif tp_hit:
-                        exit_price = tp
-                        exit_reason = "TP"
+                    exit_price, exit_reason = resolve_intrabar_bracket_exit(
+                        side=str(side),
+                        bar_high=float(h),
+                        bar_low=float(l),
+                        sl=float(sl),
+                        tp=float(tp),
+                        conservative_same_bar=bool(cfg.conservative_same_bar),
+                        same_bar_sl_reason="SL_and_TP_same_bar",
+                        same_bar_tp_reason="SL_and_TP_same_bar",
+                    )
 
                     if exit_price is not None:
                         equity, trade = _close_trade(

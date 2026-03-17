@@ -62,6 +62,23 @@ def _load_signal_cache_max(spec: dict) -> int:
     return max(0, val)
 
 
+def _get_full_system_runner(
+    *,
+    test_focus: str,
+    entry_mode: str,
+    entry_combo: tuple[dict, ...],
+):
+    if str(test_focus).strip() != "entry_test":
+        return None
+    if str(entry_mode).strip() != "all":
+        return None
+    if len(entry_combo) != 1 or not isinstance(entry_combo[0], dict):
+        return None
+    plugin = entry_combo[0].get("plugin")
+    runner = getattr(plugin, "run_full_system", None)
+    return runner if callable(runner) else None
+
+
 def run_spec(spec: dict, *, progress_every: int = 10):
     load_default_plugins()
 
@@ -159,6 +176,7 @@ def run_spec(spec: dict, *, progress_every: int = 10):
 
     signal_cache_max = _load_signal_cache_max(spec)
     signals_cache: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
+    test_focus = str(spec.get("test", {}).get("test_focus", "")).strip()
 
     save_trades = bool(spec.get("test", {}).get("save_trades", True))
 
@@ -242,41 +260,54 @@ def run_spec(spec: dict, *, progress_every: int = 10):
         return sizing_plugin(**kwargs, params=sizing_params)
 
     for entry_combo in itertools.product(*entry_variants):
-        signals_list = []
-        for rule in entry_combo:
-            key = (rule["name"], tuple(sorted(rule["params"].items())))
-            sig = None
-            if signal_cache_max > 0:
-                sig = signals_cache.get(key)
-                if sig is not None:
-                    signals_cache.move_to_end(key)
-            if sig is None:
-                sig = rule["plugin"](df, rule["params"])
+        full_system_runner = _get_full_system_runner(
+            test_focus=test_focus,
+            entry_mode=entry_mode,
+            entry_combo=entry_combo,
+        )
+        if full_system_runner is None:
+            signals_list = []
+            for rule in entry_combo:
+                key = (rule["name"], tuple(sorted(rule["params"].items())))
+                sig = None
                 if signal_cache_max > 0:
-                    signals_cache[key] = sig
-                    signals_cache.move_to_end(key)
-                    if len(signals_cache) > signal_cache_max:
-                        signals_cache.popitem(last=False)
-            signals_list.append(sig)
+                    sig = signals_cache.get(key)
+                    if sig is not None:
+                        signals_cache.move_to_end(key)
+                if sig is None:
+                    sig = rule["plugin"](df, rule["params"])
+                    if signal_cache_max > 0:
+                        signals_cache[key] = sig
+                        signals_cache.move_to_end(key)
+                        if len(signals_cache) > signal_cache_max:
+                            signals_cache.popitem(last=False)
+                signals_list.append(sig)
 
-        combined = combine_signals(signals_list, mode=entry_mode, vote_k=vote_k)
-        df_sig = build_signal_frame(
-            df,
-            combined,
-            atr_series=atr_series if requires_atr else None,
-        )
+            combined = combine_signals(signals_list, mode=entry_mode, vote_k=vote_k)
+            df_sig = build_signal_frame(
+                df,
+                combined,
+                atr_series=atr_series if requires_atr else None,
+            )
 
-        entry_iter_fn = lambda d: iter_entries_from_signals(d, use_atr=requires_atr)
-        prefilter_entries_cache: list[EntryEvent] | None = None
-        single_rule = entry_combo[0] if len(entry_combo) == 1 and isinstance(entry_combo[0], dict) else None
-        single_rule_name = str(single_rule.get("name", "")).strip() if single_rule is not None else ""
-        exact_monkey_schedule_usable = bool(
-            monkey_exact_scheduler_enabled
-            and monkey_prefilter_cfg is not None
-            and single_rule_name in MONKEY_ENTRY_PLUGIN_NAMES
-        )
-        if (monkey_prefilter_cfg is not None or monkey_fast_summary_active) and not exact_monkey_schedule_usable:
-            prefilter_entries_cache = list(entry_iter_fn(df_sig))
+            entry_iter_fn = lambda d: iter_entries_from_signals(d, use_atr=requires_atr)
+            prefilter_entries_cache: list[EntryEvent] | None = None
+            single_rule = entry_combo[0] if len(entry_combo) == 1 and isinstance(entry_combo[0], dict) else None
+            single_rule_name = str(single_rule.get("name", "")).strip() if single_rule is not None else ""
+            exact_monkey_schedule_usable = bool(
+                monkey_exact_scheduler_enabled
+                and monkey_prefilter_cfg is not None
+                and single_rule_name in MONKEY_ENTRY_PLUGIN_NAMES
+            )
+            if (monkey_prefilter_cfg is not None or monkey_fast_summary_active) and not exact_monkey_schedule_usable:
+                prefilter_entries_cache = list(entry_iter_fn(df_sig))
+        else:
+            df_sig = None
+            entry_iter_fn = None
+            prefilter_entries_cache = None
+            single_rule = entry_combo[0]
+            single_rule_name = str(single_rule.get("name", "")).strip()
+            exact_monkey_schedule_usable = False
 
         for exit_params in exit_param_space:
             attempt_count += 1
@@ -286,7 +317,18 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             fast_summary_entries: list[EntryEvent] | None = None
             fast_summary_supports_entry = prefilter_exit_supports_entry
 
-            if exact_monkey_schedule_usable and single_rule is not None:
+            if full_system_runner is not None:
+                iter_count += 1
+                _eq, _trades, summary = full_system_runner(
+                    df,
+                    entry_params=dict(single_rule.get("params", {})),
+                    exit_plugin=run_exit_plugin,
+                    exit_params=dict(exit_params),
+                    cfg=cfg,
+                    sizing_plugin=sizing_plugin,
+                    sizing_params=sizing_params,
+                )
+            elif exact_monkey_schedule_usable and single_rule is not None:
                 try:
                     exact_entries, exact_metrics = build_exact_monkey_entries_for_time_exit(
                         df_sig=df_sig,
@@ -344,26 +386,27 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             elif monkey_fast_summary_active and prefilter_entries_cache is not None:
                 fast_summary_entries = prefilter_entries_cache
 
-            iter_count += 1
-            if monkey_fast_summary_active and fast_summary_entries is not None:
-                _eq, _trades, summary = run_backtest_limited_time_exit_fast_summary(
-                    df_sig,
-                    cfg=cfg,
-                    entries=fast_summary_entries,
-                    build_exit_fn=run_exit_plugin,
-                    exit_params=exit_params,
-                    size_fn=size_fn,
-                    supports_entry_arg=bool(fast_summary_supports_entry),
-                )
-            else:
-                _eq, _trades, summary = run_backtest_limited(
-                    df_sig,
-                    cfg=cfg,
-                    entry_iter_fn=run_entry_iter_fn,
-                    build_exit_fn=run_exit_plugin,
-                    exit_params=exit_params,
-                    size_fn=size_fn,
-                )
+            if full_system_runner is None:
+                iter_count += 1
+                if monkey_fast_summary_active and fast_summary_entries is not None:
+                    _eq, _trades, summary = run_backtest_limited_time_exit_fast_summary(
+                        df_sig,
+                        cfg=cfg,
+                        entries=fast_summary_entries,
+                        build_exit_fn=run_exit_plugin,
+                        exit_params=exit_params,
+                        size_fn=size_fn,
+                        supports_entry_arg=bool(fast_summary_supports_entry),
+                    )
+                else:
+                    _eq, _trades, summary = run_backtest_limited(
+                        df_sig,
+                        cfg=cfg,
+                        entry_iter_fn=run_entry_iter_fn,
+                        build_exit_fn=run_exit_plugin,
+                        exit_params=exit_params,
+                        size_fn=size_fn,
+                    )
 
             if save_trades and _trades is not None and not _trades.empty and trade_rows is not None:
                 tdf = _trades.copy()

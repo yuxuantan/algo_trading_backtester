@@ -1,0 +1,1 @@
+"""Internal strategy contract definitions."""

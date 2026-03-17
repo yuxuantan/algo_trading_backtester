@@ -797,11 +797,6 @@ def _build_strategy_limited_section_contract(
                 spec["label"] = label
             if "integer" in raw_spec:
                 spec["integer"] = bool(raw_spec.get("integer"))
-            if "default" in raw_spec:
-                spec["default"] = copy.deepcopy(raw_spec.get("default"))
-            values = raw_spec.get("values")
-            if isinstance(values, list) and values:
-                spec["values"] = copy.deepcopy(values)
             raw_end = raw_spec.get("end", raw_spec.get("stop"))
             if all(name in raw_spec for name in ("start", "step")) and raw_end is not None:
                 try:
@@ -819,11 +814,9 @@ def _build_strategy_limited_section_contract(
                     )
                 except Exception:
                     pass
-        elif isinstance(raw_spec, list) and raw_spec:
-            spec["values"] = copy.deepcopy(raw_spec)
 
         if "values" not in spec:
-            spec["values"] = [copy.deepcopy(spec.get("default", default_value))]
+            continue
         editable_specs[key] = spec
 
     fixed_keys: list[str] = []
@@ -876,11 +869,9 @@ def _build_strategy_walkforward_param_contract(
     strategy_cfg: dict[str, Any],
     *,
     params_defaults: dict[str, Any],
-    raw_param_space: dict[str, Any],
 ) -> dict[str, Any]:
     limited_cfg = strategy_cfg.get("limited_test", {}) if isinstance(strategy_cfg, dict) else {}
     params_defaults = copy.deepcopy(params_defaults) if isinstance(params_defaults, dict) else {}
-    raw_param_space = copy.deepcopy(raw_param_space) if isinstance(raw_param_space, dict) else {}
 
     sections: dict[str, dict[str, Any]] = {}
     combined_space: dict[str, Any] = {}
@@ -917,11 +908,6 @@ def _build_strategy_walkforward_param_contract(
                     spec["label"] = label
                 if "integer" in raw_spec:
                     spec["integer"] = bool(raw_spec.get("integer"))
-                if "default" in raw_spec:
-                    spec["default"] = copy.deepcopy(raw_spec.get("default"))
-                values = raw_spec.get("values")
-                if isinstance(values, list) and values:
-                    spec["values"] = copy.deepcopy(values)
                 raw_end = raw_spec.get("end", raw_spec.get("stop"))
                 if all(name in raw_spec for name in ("start", "step")) and raw_end is not None:
                     try:
@@ -939,16 +925,9 @@ def _build_strategy_walkforward_param_contract(
                         )
                     except Exception:
                         pass
-            elif isinstance(raw_spec, list) and raw_spec:
-                spec["values"] = copy.deepcopy(raw_spec)
 
             if "values" not in spec:
-                if key in raw_param_space:
-                    raw_values = raw_param_space.get(key)
-                    if isinstance(raw_values, list) and raw_values:
-                        spec["values"] = copy.deepcopy(raw_values)
-                if "values" not in spec:
-                    spec["values"] = [copy.deepcopy(spec.get("default", default_value))]
+                continue
             editable_specs[key] = spec
             editable_keys_seen.add(key)
             combined_space[key] = copy.deepcopy(spec["values"])
@@ -976,54 +955,10 @@ def _build_strategy_walkforward_param_contract(
         for section in sections.values()
     )
 
-    if not has_policy and raw_param_space:
-        fallback_editable: dict[str, dict[str, Any]] = {}
-        fallback_fixed: dict[str, Any] = {}
-        for raw_key, raw_value in raw_param_space.items():
-            key = str(raw_key or "").strip()
-            if not key:
-                continue
-            values = copy.deepcopy(raw_value if isinstance(raw_value, list) else [raw_value])
-            if not values:
-                continue
-            default_value = copy.deepcopy(params_defaults.get(key, values[0]))
-            integer_default = isinstance(default_value, int) and not isinstance(default_value, bool)
-            if len(values) > 1:
-                spec: dict[str, Any] = {
-                    "key": key,
-                    "label": key.replace("_", " "),
-                    "integer": bool(integer_default),
-                    "default": copy.deepcopy(default_value),
-                    "values": copy.deepcopy(values),
-                }
-                derived = _derive_numeric_range_spec(values)
-                if derived is not None:
-                    start, end, step, integer_mode = derived
-                    spec["range"] = {
-                        "start": float(start),
-                        "end": float(end),
-                        "step": float(step),
-                        "integer": bool(integer_mode),
-                    }
-                    spec["integer"] = bool(integer_mode)
-                fallback_editable[key] = spec
-                combined_space[key] = copy.deepcopy(values)
-            else:
-                fallback_fixed[key] = copy.deepcopy(values[0])
-                combined_space[key] = copy.deepcopy(values[0])
-        sections = {
-            "strategy": {
-                "editable_specs": fallback_editable,
-                "fixed_params": fallback_fixed,
-            }
-        }
-        has_policy = bool(fallback_editable or fallback_fixed)
-
     return {
         "has_policy": bool(has_policy),
         "sections": sections,
         "default_param_space": combined_space,
-        "raw_param_space": raw_param_space,
     }
 
 
@@ -5137,11 +5072,9 @@ def main() -> None:
             info = strategy_catalog.get(strategy, {})
             strategy_cfg = info.get("strategy_config", {}) if isinstance(info.get("strategy_config"), dict) else {}
             params_defaults = copy.deepcopy(info.get("params_defaults", {}) or {})
-            raw_param_space = copy.deepcopy(info.get("param_space", {}) or {})
             wf_param_contract = _build_strategy_walkforward_param_contract(
                 strategy_cfg,
                 params_defaults=params_defaults,
-                raw_param_space=raw_param_space,
             )
 
             ts_col_default = str(st.session_state.get("wf_ts_col", "timestamp") or "timestamp").strip() or "timestamp"

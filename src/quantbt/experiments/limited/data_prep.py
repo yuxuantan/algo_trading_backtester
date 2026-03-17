@@ -6,6 +6,8 @@ from typing import Iterator
 
 import pandas as pd
 
+from quantbt.core.indicators import simple_atr
+
 from .types import EntryEvent
 
 
@@ -18,15 +20,7 @@ def load_price_frame(data_path: str | Path, *, ts_col: str) -> pd.DataFrame:
 
 
 def compute_atr(df: pd.DataFrame, period: int) -> pd.Series:
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    close = df["close"].astype(float)
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(period, min_periods=period).mean()
+    return simple_atr(df, period)
 
 
 def build_signal_frame(
