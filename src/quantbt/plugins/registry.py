@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import warnings
 from typing import Callable, Dict
 
 ENTRY_PLUGINS: Dict[str, Callable] = {}
@@ -49,21 +51,34 @@ def get_sizing(name: str):
     return SIZING_PLUGINS[name]
 
 
+def _safe_import_default_plugin(module_name: str) -> None:
+    try:
+        importlib.import_module(module_name)
+    except ImportError as exc:
+        warnings.warn(
+            f"Skipping unavailable default plugin module '{module_name}': {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 def load_default_plugins() -> None:
-    # Entries
-    from quantbt.plugins.entries import sma_cross  # noqa: F401
-    from quantbt.plugins.entries import random_entry  # noqa: F401
-    from quantbt.plugins.entries import donchian_breakout  # noqa: F401
-    from quantbt.plugins.entries import interequity_liqsweep_entry  # noqa: F401
-    from quantbt.plugins.entries import interequity_liqsweepb_entry  # noqa: F401
-
-    # Exits
-    from quantbt.plugins.exits import atr_brackets  # noqa: F401
-    from quantbt.plugins.exits import time_exit  # noqa: F401
-    from quantbt.plugins.exits import random_time_exit  # noqa: F401
-    from quantbt.plugins.exits import interequity_liqsweep_exit  # noqa: F401
-    from quantbt.plugins.exits import interequity_liqsweepb_exit  # noqa: F401
-
-    # Sizing
-    from quantbt.plugins.sizing import fixed_risk  # noqa: F401
-    from quantbt.plugins.sizing import fixed_units  # noqa: F401
+    module_names = [
+        # Entries
+        "quantbt.plugins.entries.sma_cross",
+        "quantbt.plugins.entries.random_entry",
+        "quantbt.plugins.entries.donchian_breakout",
+        "quantbt.plugins.entries.interequity_liqsweep_entry",
+        "quantbt.plugins.entries.interequity_liqsweepb_entry",
+        # Exits
+        "quantbt.plugins.exits.atr_brackets",
+        "quantbt.plugins.exits.time_exit",
+        "quantbt.plugins.exits.random_time_exit",
+        "quantbt.plugins.exits.interequity_liqsweep_exit",
+        "quantbt.plugins.exits.interequity_liqsweepb_exit",
+        # Sizing
+        "quantbt.plugins.sizing.fixed_risk",
+        "quantbt.plugins.sizing.fixed_units",
+    ]
+    for module_name in module_names:
+        _safe_import_default_plugin(module_name)

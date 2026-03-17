@@ -30,8 +30,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not collect/write tables/trades.csv (reduces memory usage on large runs).",
     )
-    parser.add_argument("--commission-rt", type=float, default=None, help="Commission per round trip (USD per standard lot).")
-    parser.add_argument("--spread-pips", type=float, default=None, help="Slippage/spread in pips.")
+    parser.add_argument("--commission-rt", type=float, default=5.0, help="Commission per round trip (USD per standard lot).")
+    parser.add_argument("--spread-pips", type=float, default=0.2, help="Slippage/spread in pips.")
     parser.add_argument("--pip-size", type=float, default=None, help="Pip size used to convert spread pips into price units.")
     parser.add_argument("--lot-size", type=float, default=None, help="Lot size in units for commission scaling.")
 

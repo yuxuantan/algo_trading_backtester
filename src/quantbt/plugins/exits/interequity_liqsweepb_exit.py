@@ -24,7 +24,7 @@ def build_exit(side: str, entry_open: float, prev_low: float, prev_high: float, 
             if cached is not None:
                 return cached
 
-    rr = float(params.get("rr", params.get("min_rr", 1.0)))
+    rr = float(params.get("fallback_rr", params.get("rr", params.get("min_rr", 1.0))))
     if rr <= 0:
         return None
 

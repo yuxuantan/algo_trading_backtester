@@ -95,6 +95,8 @@ Notes:
 
 ## 2. Download Data (Step by Step)
 
+For the full guide, including Streamlit workflow, MT5 Docker setup, and MT5 history troubleshooting, see `docs/workflows/download_data.md`.
+
 The project includes a unified downloader CLI:
 
 - `--provider dukascopy`

@@ -283,7 +283,7 @@ def render_reference_page(
                     c1, c2 = st.columns(2)
                     c1.markdown("**Params Dataclass Defaults**")
                     c1.code(json_pretty(info.get("params_defaults", {})), language="json")
-                    c2.markdown("**Default PARAM_SPACE**")
+                    c2.markdown("**Derived PARAM_SPACE**")
                     c2.code(json_pretty(info.get("param_space", {})), language="json")
                     c3, c4 = st.columns(2)
                     c3.markdown("**Default Entry Params**")

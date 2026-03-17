@@ -111,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--spread-pips", type=float, default=0.2)
     ap.add_argument("--pip-size", type=float, default=0.0001)
     ap.add_argument("--conservative-same-bar", action="store_true")
-    ap.add_argument("--commission-rt", type=float, default=0.0, help="Commission per round trip (USD per standard lot).")
+    ap.add_argument("--commission-rt", type=float, default=5.0, help="Commission per round trip (USD per standard lot).")
     ap.add_argument("--lot-size", type=float, default=100_000.0, help="Lot size in units for commission scaling.")
     return ap
 

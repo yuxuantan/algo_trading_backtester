@@ -13,7 +13,7 @@ class BacktestConfig:
     pip_size: float = 0.0001
     conservative_same_bar: bool = True
     min_stop_dist: float = 1e-9  # avoid insane sizing on tiny stops
-    commission_per_round_trip: float = 0.0  # dollars per 100k units (standard lot)
+    commission_per_round_trip: float = 5.0  # dollars per 100k units (standard lot)
     lot_size: float = 100_000.0
 
 def run_backtest_sma_cross(

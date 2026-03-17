@@ -226,6 +226,66 @@ def _request_rates_chunk(
     return None, 0, last_err
 
 
+def _request_rates_range_chunk(
+    mt5: MT5Client,
+    *,
+    symbol: str,
+    timeframe_mt5: int,
+    window_start_utc: pd.Timestamp,
+    window_end_utc: pd.Timestamp,
+    req: int,
+    request_cap: int,
+    progress_every: int,
+    chunk_idx: int,
+    step: pd.Timedelta,
+) -> tuple[pd.DataFrame | None, int, tuple[int, str]]:
+    range_fn = getattr(mt5, "copy_rates_range", None)
+    if not callable(range_fn):
+        return None, 0, (-7, "copy_rates_range unavailable")
+
+    first_req = min(int(req), int(request_cap))
+    candidates = [first_req] + [x for x in (5000, 2000, 1000, 500, 200, 100, 50, 10) if x < first_req]
+    last_err: tuple[int, str] = (-1, "unknown")
+    if progress_every > 0 and req > request_cap:
+        print(
+            f"Chunk {chunk_idx}: requested span {req} capped to {request_cap} bars per MT5 range call.",
+            flush=True,
+        )
+
+    for c in candidates:
+        query_start = max(window_start_utc, window_end_utc - (step * int(c)))
+        query_end = window_end_utc - pd.Timedelta(microseconds=1)
+        if query_start > query_end:
+            continue
+        if progress_every > 0:
+            print(
+                f"Chunk {chunk_idx}: requesting window=[{query_start} .. {window_end_utc}) (~{c} bars)...",
+                flush=True,
+            )
+        rates = range_fn(
+            symbol,
+            timeframe_mt5,
+            query_start.to_pydatetime(),
+            query_end.to_pydatetime(),
+        )
+        if rates is not None and len(rates) > 0:
+            if progress_every > 0:
+                print(
+                    f"Chunk {chunk_idx}: received {len(rates)} rows for window [{query_start} .. {window_end_utc}).",
+                    flush=True,
+                )
+            return pd.DataFrame(rates), c, last_err
+        last_err = _last_error(mt5)
+        if progress_every > 0:
+            code, msg = last_err
+            print(
+                f"Chunk {chunk_idx}: range request failed for window=[{query_start} .. {window_end_utc}) "
+                f"(~{c} bars) last_error=({code}) {msg}",
+                flush=True,
+            )
+    return None, 0, last_err
+
+
 _UNIT_SECONDS = {"M": 60, "H": 3600, "D": 86400, "W": 7 * 86400}
 
 
@@ -299,6 +359,16 @@ def _significant_gap_threshold(step: pd.Timedelta) -> pd.Timedelta:
     return pd.Timedelta(days=30)
 
 
+def _leading_start_gap_tolerance(step: pd.Timedelta) -> pd.Timedelta:
+    # Allow a small leading gap for weekends and common market holidays at the
+    # start of the requested window before treating it as missing history.
+    if step < pd.Timedelta(days=1):
+        return pd.Timedelta(days=4)
+    if step == pd.Timedelta(days=1):
+        return pd.Timedelta(days=10)
+    return pd.Timedelta(days=45)
+
+
 def _format_missing_ranges(
     ranges: list[tuple[pd.Timestamp, pd.Timestamp, int]],
     *,
@@ -338,7 +408,32 @@ def _validate_requested_coverage_mt5(
     if req_start >= req_end:
         raise ValueError(f"Invalid request window: start={req_start}, end={req_end}")
 
-    expected_start = _align_start_to_reference(req_start, idx[0], step)
+    actual_window = idx[(idx >= req_start) & (idx < req_end)]
+    if len(actual_window) == 0:
+        raise ValueError(
+            "Fetched MT5 dataset has no timestamps inside requested window "
+            f"[{req_start.isoformat()} .. {req_end.isoformat()})."
+        )
+
+    gap_threshold = _significant_gap_threshold(step)
+    leading_gap_tolerance = _leading_start_gap_tolerance(step)
+    front_gap = actual_window[0] - req_start
+    if front_gap > leading_gap_tolerance:
+        available_start = actual_window[0]
+        available_end = min(req_end, actual_window[-1] + step)
+        raise ValueError(
+            "Incomplete MT5 dataset coverage for "
+            f"{symbol} {timeframe} in [{req_start.isoformat()} .. {req_end.isoformat()}). "
+            f"Backend history currently starts at {available_start.isoformat()}, "
+            f"which is after requested start {req_start.isoformat()}. "
+            f"Fetched {len(actual_window)} bars covering "
+            f"[{available_start.isoformat()} .. {available_end.isoformat()}). "
+            "Older MT5 requests returned no earlier bars, which usually means the terminal or broker history "
+            "is not loaded for that symbol/timeframe."
+        )
+
+    coverage_start = actual_window[0] if front_gap > pd.Timedelta(0) else req_start
+    expected_start = _align_start_to_reference(coverage_start, idx[0], step)
     if expected_start >= req_end:
         return
 
@@ -352,8 +447,7 @@ def _validate_requested_coverage_mt5(
     if expected.empty:
         return
 
-    actual_window = idx[(idx >= req_start) & (idx < req_end)]
-    actual_matching = pd.Index(actual_window).intersection(expected)
+    actual_matching = pd.Index(actual_window[actual_window >= coverage_start]).intersection(expected)
     missing = expected.difference(actual_matching)
     if missing.empty:
         return
@@ -362,7 +456,6 @@ def _validate_requested_coverage_mt5(
     actual_count = len(actual_matching)
     coverage = actual_count / expected_count if expected_count else 1.0
     missing_ranges = _collapse_missing_ranges(missing, step)
-    gap_threshold = _significant_gap_threshold(step)
     significant_ranges = [
         (s, e, c)
         for s, e, c in missing_ranges
@@ -494,6 +587,7 @@ def _fetch_rates_by_date_range(
     mt5: MT5Client,
     *,
     symbol: str,
+    timeframe: str,
     timeframe_mt5: int,
     start_utc: pd.Timestamp,
     end_utc: pd.Timestamp,
@@ -505,11 +599,142 @@ def _fetch_rates_by_date_range(
     if start_utc >= end_utc:
         raise SystemExit("--start must be earlier than --end")
 
+    step = _timeframe_to_timedelta_mt5(timeframe)
+    range_fn = getattr(mt5, "copy_rates_range", None)
+    if step is not None and callable(range_fn):
+        cursor_end = end_utc
+        raw_parts: list[pd.DataFrame] = []
+        last_err: tuple[int, str] = (-1, "unknown")
+        reached_start = False
+        oldest_fetched: pd.Timestamp | None = None
+        history_floor: pd.Timestamp | None = None
+
+        for i in range(int(max_backfill_batches)):
+            part, _, last_err = _request_rates_range_chunk(
+                mt5,
+                symbol=symbol,
+                timeframe_mt5=timeframe_mt5,
+                window_start_utc=start_utc,
+                window_end_utc=cursor_end,
+                req=int(batch_size),
+                request_cap=request_cap,
+                progress_every=progress_every,
+                chunk_idx=i + 1,
+                step=step,
+            )
+            if part is None:
+                if cursor_end == end_utc:
+                    code, msg = last_err
+                    raise SystemExit(
+                        f"MT5 returned no rates for {symbol}. last_error=({code}) {msg}. "
+                        "Verify exact broker symbol name and MT5 login state."
+                    )
+                break
+
+            raw_chunk_ts = _as_utc_timestamp_col(part["time"])
+            valid_mask = raw_chunk_ts.notna() & (raw_chunk_ts < cursor_end)
+            part = part.loc[valid_mask].reset_index(drop=True)
+            chunk_ts = raw_chunk_ts.loc[valid_mask]
+            if part.empty or chunk_ts.empty:
+                if not raw_chunk_ts.empty:
+                    history_floor = raw_chunk_ts.min()
+                if progress_every > 0:
+                    print(
+                        f"Chunk {i + 1}: MT5 range response did not advance before {cursor_end}; stopping backfill.",
+                        flush=True,
+                    )
+                break
+
+            oldest_in_chunk = chunk_ts.min()
+            if oldest_in_chunk >= cursor_end:
+                history_floor = oldest_in_chunk
+                if progress_every > 0:
+                    print(
+                        f"Chunk {i + 1}: non-advancing oldest timestamp {oldest_in_chunk}; stopping backfill.",
+                        flush=True,
+                    )
+                break
+
+            raw_parts.append(part)
+            if oldest_in_chunk <= start_utc:
+                reached_start = True
+                break
+
+            if oldest_fetched is None or oldest_in_chunk < oldest_fetched:
+                oldest_fetched = oldest_in_chunk
+            cursor_end = oldest_in_chunk
+
+            if progress_every > 0 and ((i + 1) % progress_every == 0):
+                approx_rows = sum(len(x) for x in raw_parts)
+                total_span = (end_utc - start_utc).total_seconds()
+                covered_span = (end_utc - oldest_fetched).total_seconds() if oldest_fetched is not None else 0.0
+                coverage_pct = 100.0 if total_span <= 0 else max(0.0, min(100.0, 100.0 * covered_span / total_span))
+                print(
+                    f"Backfill progress: batches={i + 1}, rows={approx_rows}, "
+                    f"oldest={oldest_fetched if oldest_fetched is not None else 'n/a'}, "
+                    f"time-coverage~{coverage_pct:.2f}%",
+                    flush=True,
+                )
+
+        if not raw_parts:
+            code, msg = last_err
+            raise SystemExit(f"MT5 returned no rates for {symbol}. last_error=({code}) {msg}")
+
+        raw = pd.concat(raw_parts, ignore_index=True)
+        all_rates = _normalize_rates_payload(raw)
+        df = all_rates[(all_rates.index >= start_utc) & (all_rates.index < end_utc)].copy()
+        if df.empty:
+            avail_start = all_rates.index.min()
+            avail_end = all_rates.index.max()
+            if avail_start >= end_utc:
+                reason = (
+                    f"Available history starts at {avail_start.isoformat()}, "
+                    f"which is after requested end {end_utc.isoformat()}."
+                )
+            elif avail_end < start_utc:
+                reason = (
+                    f"Available history ends at {avail_end.isoformat()}, "
+                    f"which is before requested start {start_utc.isoformat()}."
+                )
+            else:
+                reason = (
+                    f"Available fetched range is [{avail_start.isoformat()} .. {avail_end.isoformat()}], "
+                    "but no bars matched requested window boundaries."
+                )
+            raise SystemExit(
+                f"No bars available in requested window [{start_utc.isoformat()} .. {end_utc.isoformat()}) "
+                f"for {symbol}. {reason}"
+            )
+
+        if not reached_start:
+            oldest = all_rates.index.min()
+            leading_gap = oldest - start_utc
+            leading_gap_tolerance = _leading_start_gap_tolerance(step) if step is not None else pd.Timedelta(0)
+            if leading_gap > pd.Timedelta(0) and step is not None and leading_gap <= leading_gap_tolerance:
+                pass
+            elif history_floor is not None and history_floor >= oldest and oldest > start_utc:
+                print(
+                    "WARNING: MT5 backend appears to expose no history earlier than "
+                    f"{oldest}. Older range requests returned the same boundary bar. "
+                    "This usually means the terminal or broker has not loaded deeper history for "
+                    f"{symbol} {timeframe}. Completeness validation will determine pass/fail."
+                )
+            else:
+                print(
+                    "WARNING: Could not backfill fully to requested start. "
+                    f"Earliest fetched bar is {oldest}. "
+                    f"Try increasing --max-backfill-batches (currently {max_backfill_batches}) "
+                    "and ensure MT5 history depth is expanded in terminal settings. "
+                    "Completeness validation will determine pass/fail."
+                )
+        return df
+
     pos = 0
     raw_parts: list[pd.DataFrame] = []
     last_err: tuple[int, str] = (-1, "unknown")
     reached_start = False
     oldest_fetched: pd.Timestamp | None = None
+    history_floor: pd.Timestamp | None = None
 
     for i in range(int(max_backfill_batches)):
         part, used_count, last_err = _request_rates_chunk(
@@ -542,6 +767,14 @@ def _fetch_rates_by_date_range(
             break
 
         if pd.notna(oldest_in_chunk):
+            if oldest_fetched is not None and oldest_in_chunk >= oldest_fetched:
+                history_floor = oldest_in_chunk
+                if progress_every > 0:
+                    print(
+                        f"Chunk {i + 1}: positional paging did not advance beyond {oldest_fetched}; stopping backfill.",
+                        flush=True,
+                    )
+                break
             if oldest_fetched is None or oldest_in_chunk < oldest_fetched:
                 oldest_fetched = oldest_in_chunk
 
@@ -593,13 +826,25 @@ def _fetch_rates_by_date_range(
 
     if not reached_start:
         oldest = all_rates.index.min()
-        print(
-            "WARNING: Could not backfill fully to requested start. "
-            f"Earliest fetched bar is {oldest}. "
-            f"Try increasing --max-backfill-batches (currently {max_backfill_batches}) "
-            "and ensure MT5 history depth is expanded in terminal settings. "
-            "Completeness validation will determine pass/fail."
-        )
+        leading_gap = oldest - start_utc
+        leading_gap_tolerance = _leading_start_gap_tolerance(step) if step is not None else pd.Timedelta(0)
+        if leading_gap > pd.Timedelta(0) and step is not None and leading_gap <= leading_gap_tolerance:
+            pass
+        elif history_floor is not None and history_floor >= oldest and oldest > start_utc:
+            print(
+                "WARNING: MT5 backend appears to expose no history earlier than "
+                f"{oldest}. Older positional requests returned the same boundary bar. "
+                "This usually means the terminal or broker has not loaded deeper history for "
+                f"{symbol} {timeframe}. Completeness validation will determine pass/fail."
+            )
+        else:
+            print(
+                "WARNING: Could not backfill fully to requested start. "
+                f"Earliest fetched bar is {oldest}. "
+                f"Try increasing --max-backfill-batches (currently {max_backfill_batches}) "
+                "and ensure MT5 history depth is expanded in terminal settings. "
+                "Completeness validation will determine pass/fail."
+            )
     return df
 
 
@@ -679,13 +924,13 @@ def main() -> None:
         "--batch-size",
         type=int,
         default=1000,
-        help="Per-request chunk size for copy_rates_from_pos (smaller is safer on RPC bridges).",
+        help="Approximate bars per MT5 history request (smaller is safer on RPC bridges).",
     )
     parser.add_argument(
         "--request-cap",
         type=int,
         default=5000,
-        help="Hard cap for single copy_rates_from_pos request size to avoid bridge stalls/invalid params.",
+        help="Hard cap for approximate bars per MT5 history request to avoid bridge stalls/invalid params.",
     )
     parser.add_argument(
         "--max-backfill-batches",
@@ -795,6 +1040,7 @@ def main() -> None:
             df = _fetch_rates_by_date_range(
                 mt5,
                 symbol=symbol,
+                timeframe=timeframe,
                 timeframe_mt5=timeframe_mt5,
                 start_utc=start_utc,
                 end_utc=end_utc,

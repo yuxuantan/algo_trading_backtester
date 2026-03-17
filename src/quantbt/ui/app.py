@@ -6204,8 +6204,12 @@ def main() -> None:
                 st.session_state["limited_favourable_criteria"] = str(tpl.get("favourable_criteria", ""))
                 st.session_state["limited_pass_threshold"] = str(tpl.get("pass_threshold", ""))
                 st.session_state["limited_extra_args"] = str(tpl.get("extra_args", ""))
-                st.session_state.setdefault("limited_commission_rt", "")
-                st.session_state.setdefault("limited_spread_pips", "")
+                st.session_state.setdefault("limited_commission_rt", "5")
+                st.session_state.setdefault("limited_spread_pips", "0.2")
+                if not str(st.session_state.get("limited_commission_rt", "")).strip():
+                    st.session_state["limited_commission_rt"] = "5"
+                if not str(st.session_state.get("limited_spread_pips", "")).strip():
+                    st.session_state["limited_spread_pips"] = "0.2"
                 st.session_state.setdefault("limited_pip_size", "0.0001")
 
             def _apply_workbook_review_defaults(workbook_def: dict[str, Any]) -> None:
@@ -6227,8 +6231,12 @@ def main() -> None:
             st.session_state.setdefault("limited_run_base", "")
             st.session_state.setdefault("limited_test_name", "")
             st.session_state.setdefault("limited_progress_every", 10)
-            st.session_state.setdefault("limited_commission_rt", "")
-            st.session_state.setdefault("limited_spread_pips", "")
+            st.session_state.setdefault("limited_commission_rt", "5")
+            st.session_state.setdefault("limited_spread_pips", "0.2")
+            if not str(st.session_state.get("limited_commission_rt", "")).strip():
+                st.session_state["limited_commission_rt"] = "5"
+            if not str(st.session_state.get("limited_spread_pips", "")).strip():
+                st.session_state["limited_spread_pips"] = "0.2"
             st.session_state.setdefault("limited_pip_size", "0.0001")
             st.session_state.setdefault("limited_pass_threshold", "")
             st.session_state.setdefault("limited_min_trades", "")
@@ -6627,9 +6635,18 @@ def main() -> None:
                     str(current_exit_name or "") == "atr_brackets" or "rr" in exit_params_dict
                 ):
                     show_exit_json_in_main = False
-                    rr_key = "rr" if ("rr" in exit_params_dict or str(current_exit_name or "") == "atr_brackets") else "min_rr"
+                    is_atr_brackets = str(current_exit_name or "") == "atr_brackets"
+                    if str(current_exit_name or "") == "atr_brackets" or "rr" in exit_params_dict:
+                        rr_key = "rr"
+                    elif "fallback_rr" in exit_params_dict:
+                        rr_key = "fallback_rr"
+                    else:
+                        rr_key = "min_rr"
                     rr_default = _value_to_csv_text(
-                        exit_params_dict.get(rr_key, exit_params_dict.get("rr", exit_params_dict.get("min_rr", 1.5)))
+                        exit_params_dict.get(
+                            rr_key,
+                            exit_params_dict.get("fallback_rr", exit_params_dict.get("rr", exit_params_dict.get("min_rr", 1.5))),
+                        )
                     )
                     _sync_widget_from_source("limited_structured_rr_values", rr_default)
                     rr_text = st.text_input(
@@ -6641,9 +6658,30 @@ def main() -> None:
                     structured_input_checks.append((rr_ok, "RR value(s)", rr_detail))
                     if rr_ok and rr_value is not None:
                         exit_params_dict[rr_key] = rr_value
-                        st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
+                    if is_atr_brackets:
+                        stop_dist_default = _value_to_csv_text(
+                            exit_params_dict.get(
+                                "sldist_atr_mult",
+                                exit_params_dict.get("sldist_atr", 1.0),
+                            )
+                        )
+                        _sync_widget_from_source("limited_structured_sldist_atr_mult", stop_dist_default)
+                        stop_dist_text = st.text_input(
+                            "Stop-distance ATR multiple(s)",
+                            key="limited_structured_sldist_atr_mult",
+                            help="Enter a single stop-distance ATR multiple or comma-separated values to sweep multiple settings.",
+                        )
+                        stop_dist_ok, stop_dist_value, stop_dist_detail = _parse_csv_numeric_text(stop_dist_text, kind="float")
+                        structured_input_checks.append((stop_dist_ok, "Stop-distance ATR multiple(s)", stop_dist_detail))
+                        if stop_dist_ok and stop_dist_value is not None:
+                            exit_params_dict["sldist_atr_mult"] = stop_dist_value
+                            exit_params_dict.pop("sldist_atr", None)
+                    st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
                     exit_params = st.session_state.get("limited_exit_params_json", _json_pretty(exit_params_dict))
-                    st.caption("Other exit parameters are preserved. Use Advanced if you need to edit stop-distance or plugin-specific fields.")
+                    if is_atr_brackets:
+                        st.caption("RR and stop-distance ATR multiplier are shown here. Other exit parameters are preserved; use Advanced to edit plugin-specific fields like ATR period.")
+                    else:
+                        st.caption("Other exit parameters are preserved. Use Advanced if you need to edit plugin-specific fields.")
                 elif str(current_exit_name or "") == "time_exit":
                     show_exit_json_in_main = False
                     hold_bars_default = _value_to_csv_text(exit_params_dict.get("hold_bars", 1))
