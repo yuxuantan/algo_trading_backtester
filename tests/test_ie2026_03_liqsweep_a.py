@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import sys
 import unittest
 import warnings
@@ -15,12 +15,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-MODULE_PATH = PROJECT_ROOT / "src" / "quantbt" / "strategies" / "IE2026-03 LiqSweep A.py"
-MODULE_SPEC = importlib.util.spec_from_file_location("ie2026_03_liqsweep_a", MODULE_PATH)
-assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
-liq_sweep_a = importlib.util.module_from_spec(MODULE_SPEC)
-sys.modules[MODULE_SPEC.name] = liq_sweep_a
-MODULE_SPEC.loader.exec_module(liq_sweep_a)
+liq_sweep_a = importlib.import_module("quantbt.strategies.interequity_2026_03_liqsweep_a")
 
 from quantbt.plugins.exits.interequity_liqsweep_exit import build_exit as build_liqsweep_exit
 from quantbt.plugins.registry import ENTRY_PLUGINS, load_default_plugins
