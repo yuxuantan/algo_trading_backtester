@@ -19,7 +19,6 @@ dist/
 .DS_Store
 
 # Local experiment outputs and large local datasets
-runs/
 data/processed/
 
 # Keep tracked sample data folder (if used)
