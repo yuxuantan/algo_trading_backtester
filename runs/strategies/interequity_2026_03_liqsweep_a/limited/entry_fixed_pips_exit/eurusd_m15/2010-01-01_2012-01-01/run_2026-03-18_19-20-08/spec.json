@@ -1,0 +1,141 @@
+{
+  "spec": {
+    "strategy": {
+      "name": "IE2026-03 LiqSweep A",
+      "entry": {
+        "mode": "all",
+        "rules": [
+          {
+            "name": "interequity_liqsweep_entry",
+            "params": {
+              "atr_dist_for_liq_generation": [
+                1.4,
+                1.6,
+                1.8,
+                2.0,
+                2.2,
+                2.4,
+                2.6,
+                2.8,
+                3.0,
+                3.2
+              ],
+              "liq_move_away_atr": [
+                1.0,
+                1.5,
+                2.0,
+                2.5,
+                3.0,
+                3.5,
+                4.0,
+                4.5,
+                5.0,
+                5.5
+              ],
+              "max_rr": 10.0,
+              "min_rr": 1.0
+            }
+          }
+        ]
+      },
+      "exit": {
+        "name": "fixed_pips_brackets",
+        "params": {
+          "pip_size": 0.0001,
+          "rr": 1.5,
+          "stop_pips": 30.0
+        }
+      },
+      "sizing": {
+        "name": "fixed_risk",
+        "params": {
+          "risk_pct": 0.01
+        }
+      },
+      "limited_test": {
+        "entry": {
+          "optimizable": {
+            "atr_dist_for_liq_generation": {
+              "label": "ATR distance for liquidity generation",
+              "start": 0.4,
+              "stop": 2.2,
+              "step": 0.2,
+              "integer": false
+            },
+            "liq_move_away_atr": {
+              "label": "Liquidity move-away ATR",
+              "start": 1.0,
+              "stop": 5.5,
+              "step": 0.5,
+              "integer": false
+            }
+          },
+          "non_optimizable": [
+            "min_rr",
+            "max_rr"
+          ]
+        },
+        "exit": {
+          "optimizable": {},
+          "non_optimizable": [
+            "fallback_rr",
+            "sl_buffer_pips",
+            "pip_size"
+          ]
+        }
+      }
+    },
+    "data": "data/processed/eurusd_m15_20100101_20120101_mt5_ftmo_python.csv",
+    "ts_col": "timestamp",
+    "test": {
+      "signal_cache_max": 128,
+      "strategy_tag": "interequity_2026_03_liqsweep_a",
+      "strategy_module": "quantbt.strategies.interequity_2026_03_liqsweep_a",
+      "test_focus": "entry_test",
+      "core_system_test": false,
+      "test_name": "entry_test__interequity_liqsweep_entry__fixed_pips_exit"
+    },
+    "config": {
+      "commission_per_round_trip": 5.0,
+      "spread_pips": 0.2,
+      "pip_size": 0.0001
+    }
+  },
+  "dataset_meta": {
+    "dataset_id": "EURUSD_M15_90bfccf47e1b",
+    "file_path": "data/processed/eurusd_m15_20100101_20120101_mt5_ftmo_python.csv",
+    "file_sha256": "90bfccf47e1bc97b620af6bd935e603c3e7602ce198a40dd8fa42afa2ab6118f",
+    "rows": 49437,
+    "start": "2010-01-04 00:00:00+00:00",
+    "end": "2011-12-30 23:00:00+00:00",
+    "timeframe": "M15",
+    "symbol": "EURUSD",
+    "source": "mt5_ftmo_python",
+    "created_at": "2026-03-16T17:57:51",
+    "extra": {
+      "provider": "mt5_terminal",
+      "backend": "silicon",
+      "requested_bars": null,
+      "requested_start": "2010-01-01T00:00:00+00:00",
+      "requested_end": "2012-01-01T00:00:00+00:00",
+      "timeframe": "M15",
+      "symbol": "EURUSD",
+      "server": "FTMO-Server3",
+      "login": 531094817,
+      "terminal": "MetaTrader 5",
+      "terminal_build": 5660
+    }
+  },
+  "criteria": {
+    "mode": "all",
+    "rules": [
+      {
+        "metric": "avg_profit_per_trade",
+        "op": ">",
+        "value": 0.0
+      }
+    ]
+  },
+  "pass_threshold_%": 70.0,
+  "min_trades": 30
+}
