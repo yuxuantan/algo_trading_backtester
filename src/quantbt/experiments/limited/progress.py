@@ -13,6 +13,23 @@ def _fmt_value(v):
     return str(v)
 
 
+def _fmt_param_value(v):
+    if isinstance(v, float):
+        if math.isnan(v):
+            return "nan"
+        if float(v).is_integer():
+            return str(int(v))
+        return f"{v:.6g}"
+    return str(v)
+
+
+def _fmt_param_block(title: str, params) -> str:
+    if not params:
+        return f"{title}=-"
+    items = ",".join(f"{k}={_fmt_param_value(v)}" for k, v in params.items())
+    return f"{title}[{items}]"
+
+
 def _criteria_status(criteria: dict, summary: dict) -> str:
     parts = []
     for rule in criteria.get("rules", []):
@@ -26,7 +43,7 @@ def _criteria_status(criteria: dict, summary: dict) -> str:
     return f"{mode}: {joined}"
 
 
-def print_progress(i, total, elapsed, last_summary, *, pass_pct, criteria):
+def print_progress(i, total, elapsed, last_summary, *, pass_pct, criteria, entry_params=None, exit_params=None):
     pct = 100 * i / total if total else 100.0
     rate = elapsed / i if i > 0 else 0.0
     eta = rate * (total - i) if total else 0.0
@@ -37,6 +54,8 @@ def print_progress(i, total, elapsed, last_summary, *, pass_pct, criteria):
         f"ETA {eta:6.1f}s | "
         f"last_ret {last_summary.get('total_return_%', float('nan')):6.2f}% | "
         f"pass {pass_pct:6.2f}% | "
+        f"{_fmt_param_block('entry', entry_params)} | "
+        f"{_fmt_param_block('exit', exit_params)} | "
         f"criteria {_criteria_status(criteria, last_summary)}",
         flush=True,
     )

@@ -62,6 +62,47 @@ def _load_signal_cache_max(spec: dict) -> int:
     return max(0, val)
 
 
+def _grid_param_keys(params: dict | None) -> list[str]:
+    if not isinstance(params, dict):
+        return []
+    return [
+        str(k)
+        for k, v in params.items()
+        if isinstance(v, list) and not str(k).endswith("_values")
+    ]
+
+
+def _select_progress_params(params: dict | None, keys: list[str]) -> dict[str, object]:
+    if not isinstance(params, dict):
+        return {}
+    if not keys:
+        return {}
+    out: dict[str, object] = {}
+    for key in keys:
+        if key in params:
+            out[str(key)] = params[key]
+    return out
+
+
+def _select_progress_entry_params(entry_combo: tuple[dict, ...], entry_rule_grid_keys: list[list[str]]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for idx, rule in enumerate(entry_combo):
+        if not isinstance(rule, dict):
+            continue
+        rule_name = str(rule.get("name", f"rule{idx + 1}"))
+        rule_params = rule.get("params", {})
+        grid_keys = entry_rule_grid_keys[idx] if idx < len(entry_rule_grid_keys) else []
+        selected = _select_progress_params(rule_params, grid_keys)
+        if len(entry_combo) == 1:
+            out.update(selected)
+        elif selected:
+            for key, value in selected.items():
+                out[f"{rule_name}.{key}"] = value
+        else:
+            out[rule_name] = "-"
+    return out
+
+
 def _get_full_system_runner(
     *,
     test_focus: str,
@@ -79,7 +120,7 @@ def _get_full_system_runner(
     return runner if callable(runner) else None
 
 
-def run_spec(spec: dict, *, progress_every: int = 10):
+def run_spec(spec: dict, *, progress_every: int = 1):
     load_default_plugins()
 
     if "data" not in spec:
@@ -103,11 +144,13 @@ def run_spec(spec: dict, *, progress_every: int = 10):
     rules = entry_spec.get("rules", [])
 
     entry_variants, skipped = build_entry_variants(rules)
+    entry_rule_grid_keys = [_grid_param_keys(rule.get("params", {})) for rule in rules]
     if skipped:
         print(f"skipped {len(skipped)} invalid entry param sets")
 
     exit_plugin = get_exit(exit_spec["name"])
     exit_param_space = build_exit_param_space(exit_spec)
+    exit_grid_keys = _grid_param_keys(exit_spec.get("params", {}))
 
     sizing_plugin = get_sizing(sizing_spec.get("name", "fixed_risk"))
     sizing_params = sizing_spec.get("params", {})
@@ -464,7 +507,16 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             if progress_every and (attempt_count % progress_every == 0 or attempt_count == total):
                 elapsed = time.time() - start_ts
                 pass_pct = (pass_count / iter_count) * 100 if iter_count else 0.0
-                print_progress(attempt_count, total, elapsed, summary, pass_pct=pass_pct, criteria=criteria)
+                print_progress(
+                    attempt_count,
+                    total,
+                    elapsed,
+                    summary,
+                    pass_pct=pass_pct,
+                    criteria=criteria,
+                    entry_params=_select_progress_entry_params(entry_combo, entry_rule_grid_keys),
+                    exit_params=_select_progress_params(exit_params, exit_grid_keys),
+                )
 
             if monkey_seq_enabled and iter_count > 0:
                 min_accepted = int(monkey_seq_cfg.get("min_accepted", 1000))

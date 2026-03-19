@@ -142,8 +142,8 @@ LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
             "# iterations",
         ],
         "pass_criteria": [
-            "% profitable > 70%",
-            "# iterations > 50",
+            "% profitable (>=30 trades) >= 70%",
+            "# iterations (>=30 trades) >= 100",
         ],
     },
     {
@@ -163,8 +163,8 @@ LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
             "# iterations",
         ],
         "pass_criteria": [
-            "% profitable > 70%",
-            "# iterations > 50",
+            "% profitable (>=30 trades) >= 70%",
+            "# iterations (>=30 trades) >= 100",
         ],
     },
     {
@@ -185,8 +185,8 @@ LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
             "# iterations",
         ],
         "pass_criteria": [
-            "% profitable > 70%",
-            "# iterations > 50",
+            "% profitable (>=30 trades) >= 70%",
+            "# iterations (>=30 trades) >= 100",
         ],
     },
     {
@@ -206,8 +206,8 @@ LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
             "# iterations",
         ],
         "pass_criteria": [
-            "% profitable > 70%",
-            "# iterations > 50",
+            "% profitable (>=30 trades) >= 70%",
+            "# iterations (>=30 trades) >= 100",
         ],
     },
     {
@@ -6329,7 +6329,7 @@ def main() -> None:
             st.session_state.setdefault("limited_sizing_params_json", _json_pretty(_strategy_default_sizing_params()))
             st.session_state.setdefault("limited_run_base", "")
             st.session_state.setdefault("limited_test_name", "")
-            st.session_state.setdefault("limited_progress_every", 10)
+            st.session_state.setdefault("limited_progress_every", 1)
             st.session_state.setdefault("limited_commission_rt", "5")
             st.session_state.setdefault("limited_spread_pips", "0.2")
             if not str(st.session_state.get("limited_commission_rt", "")).strip():

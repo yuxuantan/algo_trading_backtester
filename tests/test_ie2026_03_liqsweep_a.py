@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 liq_sweep_a = importlib.import_module("quantbt.strategies.interequity_2026_03_liqsweep_a")
 
 from quantbt.plugins.exits.interequity_liqsweep_exit import build_exit as build_liqsweep_exit
+from quantbt.plugins.exits.time_exit import build_exit as build_time_exit
 from quantbt.plugins.registry import ENTRY_PLUGINS, load_default_plugins
 
 
@@ -240,6 +241,29 @@ class Ie202603LiqSweepATests(unittest.TestCase):
         )
 
         self.assertIsNone(entry_spec)
+
+    def test_run_backtest_supports_time_exit_override(self) -> None:
+        df = _sample_ohlc(rows=6)
+        params = liq_sweep_a.Params(min_rr=1.0, max_rr=10.0, risk_pct=0.01)  # pylint: disable=not-callable
+        feat = liq_sweep_a.compute_features(df, params)
+        sig = liq_sweep_a.compute_signals(feat)
+
+        trigger_seq = [(None, 1.1000)] + [(None, None)] * (len(sig) - 1)
+        with mock.patch.object(liq_sweep_a, "sweep_triggers", side_effect=trigger_seq), mock.patch.object(
+            liq_sweep_a,
+            "_structural_entry_gate",
+            return_value={"sl": 1.0990, "tp": 1.1020, "risk_dist": 0.001, "reward_dist": 0.002, "rr": 2.0},
+        ):
+            _eq, trades_df, summary = liq_sweep_a.run_backtest(
+                sig,
+                strategy_params=params,
+                override_exit_builder=build_time_exit,
+                override_exit_params={"hold_bars": 1},
+            )
+
+        self.assertEqual(int(summary["trades"]), 1)
+        self.assertEqual(len(trades_df), 1)
+        self.assertEqual(str(trades_df.iloc[0]["exit_reason"]), "TIME_EXIT")
 
     def test_sweep_triggers_return_last_breached_red_levels(self) -> None:
         high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access

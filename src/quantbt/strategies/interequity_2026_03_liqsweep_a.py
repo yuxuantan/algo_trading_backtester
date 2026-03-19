@@ -767,6 +767,7 @@ def _build_entry_spec_from_exit_override(
     exit_supports_entry: bool,
     size_fn=None,
     sizing_params: dict[str, Any] | None = None,
+    max_exit_index: int | None = None,
 ) -> dict[str, Any] | None:
     del signal_price
     structural_gate = _structural_entry_gate(
@@ -807,8 +808,50 @@ def _build_entry_spec_from_exit_override(
             float(prev_high),
             exit_params,
         )
-    if not isinstance(exit_spec, dict) or "hold_bars" in exit_spec:
+    if not isinstance(exit_spec, dict):
         return None
+
+    if "hold_bars" in exit_spec:
+        try:
+            hold_bars = int(exit_spec["hold_bars"])
+        except Exception:
+            return None
+        if hold_bars <= 0:
+            return None
+
+        sizing_params = dict(sizing_params or {})
+        fallback_stop_dist = 10.0 * float(cfg.pip_size)
+        if callable(size_fn):
+            qty = size_fn(
+                cfg=cfg,
+                equity=float(equity),
+                side=str(side),
+                entry_open=float(entry_open),
+                exit_spec={"hold_bars": hold_bars},
+                entry=entry_ctx,
+                params=sizing_params,
+            )
+            risk_dollars = float(qty) * fallback_stop_dist if qty is not None and math.isfinite(float(qty)) else float("nan")
+        else:
+            risk_amount = float(cfg.initial_equity) * float(strategy_params.risk_pct)
+            qty = risk_amount / fallback_stop_dist
+            risk_dollars = float(risk_amount)
+        if qty is None or not math.isfinite(float(qty)) or float(qty) <= 0:
+            return None
+
+        time_exit_i = int(entry_index + hold_bars)
+        if max_exit_index is not None:
+            time_exit_i = min(time_exit_i, int(max_exit_index))
+
+        return {
+            "entry_i": int(entry_index),
+            "side": str(side),
+            "qty": float(qty),
+            "sl": float("nan"),
+            "tp": float("nan"),
+            "risk_dollars": float(risk_dollars) if math.isfinite(float(risk_dollars)) else float("nan"),
+            "time_exit_i": int(time_exit_i),
+        }
 
     try:
         sl = float(exit_spec["sl"])
@@ -893,15 +936,18 @@ def _open_position_from_entry_spec(
     entry_price: float,
     entry_time: pd.Timestamp,
 ) -> dict[str, Any]:
-    return {
+    pos = {
         "side": str(entry_spec["side"]),
         "entry": float(entry_price),
-        "sl": float(entry_spec["sl"]),
-        "tp": float(entry_spec["tp"]),
+        "sl": float(entry_spec.get("sl", float("nan"))),
+        "tp": float(entry_spec.get("tp", float("nan"))),
         "units": float(entry_spec["qty"]),
         "entry_time": pd.Timestamp(entry_time),
         "risk_dollars": float(entry_spec["risk_dollars"]),
     }
+    if "time_exit_i" in entry_spec:
+        pos["time_exit_i"] = int(entry_spec["time_exit_i"])
+    return pos
 
 
 def _build_entry_spec(
@@ -1030,7 +1076,7 @@ def run_backtest(
         if trade is not None:
             trades.append(trade)
 
-        if pos is not None:
+        if pos is not None and math.isfinite(float(pos.get("sl", float("nan")))) and math.isfinite(float(pos.get("tp", float("nan")))):
             exit_price, exit_reason = resolve_intrabar_bracket_exit(
                 side=str(pos["side"]),
                 bar_high=h,
@@ -1170,6 +1216,7 @@ def run_backtest(
                     exit_supports_entry=exit_override_supports_entry,
                     size_fn=override_size_fn,
                     sizing_params=sizing_override_params,
+                    max_exit_index=len(df) - 1,
                 )
             else:
                 entry_spec = _build_entry_spec(
@@ -1213,6 +1260,7 @@ def run_backtest(
                     exit_supports_entry=exit_override_supports_entry,
                     size_fn=override_size_fn,
                     sizing_params=sizing_override_params,
+                    max_exit_index=len(df) - 1,
                 )
             else:
                 entry_spec = _build_entry_spec(
@@ -1232,7 +1280,7 @@ def run_backtest(
                 )
                 opened_this_bar = True
 
-        if opened_this_bar and pos is not None:
+        if opened_this_bar and pos is not None and math.isfinite(float(pos.get("sl", float("nan")))) and math.isfinite(float(pos.get("tp", float("nan")))):
             exit_price, exit_reason = resolve_intrabar_bracket_exit(
                 side=str(pos["side"]),
                 bar_high=h,
@@ -1252,6 +1300,19 @@ def run_backtest(
                 )
                 trades.append(trade)
                 pos = None
+
+        if pos is not None and "time_exit_i" in pos and int(pos["time_exit_i"]) <= i:
+            equity, trade = close_trade_with_costs(
+                pos=pos,
+                exit_price=float(c),
+                exit_time=t,
+                exit_reason="TIME_EXIT",
+                equity_now=equity,
+                cfg=cfg,
+            )
+            trades.append(trade)
+            pos = None
+            pending_market_exit = None
 
         if not exit_override_active and i < len(df) - 1:
             pending_market_exit = _schedule_force_exit(

@@ -117,4 +117,30 @@ def _validate(params: dict) -> bool:
     return True
 
 
+def run_full_system(
+    df: pd.DataFrame,
+    *,
+    entry_params: dict,
+    exit_plugin,
+    exit_params: dict,
+    cfg,
+    sizing_plugin=None,
+    sizing_params: dict | None = None,
+):
+    mod = _load_strategy_module()
+    p = mod.Params(**entry_params)
+    df_feat = mod.compute_features(df, p)
+    df_sig = mod.compute_signals(df_feat)
+    return mod.run_backtest(
+        df_sig,
+        strategy_params=p,
+        cfg=cfg,
+        override_exit_builder=exit_plugin,
+        override_exit_params=dict(exit_params),
+        override_size_fn=sizing_plugin,
+        override_sizing_params=dict(sizing_params or {}),
+    )
+
+
 signals.validate = _validate
+signals.run_full_system = run_full_system
