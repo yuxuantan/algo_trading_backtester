@@ -155,6 +155,20 @@ def build_backtest_summary(
 ) -> dict[str, Any]:
     eq = _as_equity_series(equity_like)
     initial = float(initial_equity)
+    avg_profit = float("nan")
+    win_rate = float("nan")
+    avg_r = float("nan")
+
+    if trades_df is not None and not trades_df.empty:
+        if "pnl" in trades_df.columns:
+            pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            if not pnl.empty:
+                win_rate = float((pnl > 0).mean())
+                avg_profit = float(pnl.mean())
+        if "r_multiple" in trades_df.columns:
+            r = pd.to_numeric(trades_df["r_multiple"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            if not r.empty:
+                avg_r = float(r.mean())
 
     if eq.empty:
         summary: dict[str, Any] = {
@@ -162,9 +176,10 @@ def build_backtest_summary(
             "final_equity": initial,
             "total_return_%": 0.0,
             "max_drawdown_%": 0.0,
-            "win_rate_%": float("nan"),
+            "win_rate_%": float(win_rate * 100.0) if math.isfinite(win_rate) else float("nan"),
             "profit_factor": float("nan"),
-            "avg_R": float("nan"),
+            "avg_R": float(avg_r) if math.isfinite(avg_r) else float("nan"),
+            "avg_profit_per_trade": float(avg_profit) if math.isfinite(avg_profit) else float("nan"),
         }
         if include_common_metrics:
             summary.update(
@@ -180,17 +195,6 @@ def build_backtest_summary(
     total_return = (final_equity / initial) - 1.0 if initial > 0 else float("nan")
     mdd = max_drawdown(eq)
     pf = profit_factor(trades_df)
-    win_rate = float("nan")
-    avg_r = float("nan")
-    if trades_df is not None and not trades_df.empty:
-        if "pnl" in trades_df.columns:
-            pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-            if not pnl.empty:
-                win_rate = float((pnl > 0).mean())
-        if "r_multiple" in trades_df.columns:
-            r = pd.to_numeric(trades_df["r_multiple"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-            if not r.empty:
-                avg_r = float(r.mean())
 
     summary = {
         "trades": int(0 if trades_df is None else len(trades_df)),
@@ -200,6 +204,7 @@ def build_backtest_summary(
         "win_rate_%": float(win_rate * 100.0) if math.isfinite(win_rate) else float("nan"),
         "profit_factor": float(pf) if math.isfinite(pf) else (float("inf") if pf == float("inf") else float("nan")),
         "avg_R": float(avg_r) if math.isfinite(avg_r) else float("nan"),
+        "avg_profit_per_trade": float(avg_profit) if math.isfinite(avg_profit) else float("nan"),
     }
     if include_common_metrics:
         summary.update(

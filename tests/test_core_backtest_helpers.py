@@ -72,10 +72,25 @@ class CoreBacktestHelperTests(unittest.TestCase):
         self.assertAlmostEqual(float(summary["total_return_%"]), 1.0, places=8)
         self.assertAlmostEqual(float(summary["profit_factor"]), 2.0, places=8)
         self.assertAlmostEqual(float(summary["avg_R"]), 0.25, places=8)
+        self.assertAlmostEqual(float(summary["avg_profit_per_trade"]), 25.0, places=8)
         self.assertEqual(int(summary["wins"]), 1)
         self.assertEqual(int(summary["losses"]), 1)
         self.assertIn("cagr_%", summary)
         self.assertIn("sortino", summary)
+
+    def test_build_backtest_summary_exposes_avg_profit_per_trade_by_default(self) -> None:
+        idx = pd.date_range("2025-01-01", periods=3, freq="D", tz="UTC")
+        equity_df = pd.DataFrame({"equity": [100_000.0, 100_250.0, 100_500.0]}, index=idx)
+        trades_df = pd.DataFrame({"pnl": [100.0, -25.0, 50.0]})
+
+        summary = build_backtest_summary(
+            equity_like=equity_df,
+            trades_df=trades_df,
+            initial_equity=100_000.0,
+        )
+
+        self.assertAlmostEqual(float(summary["avg_profit_per_trade"]), 41.6666666667, places=6)
+        self.assertAlmostEqual(float(summary["win_rate_%"]), 66.6666666667, places=6)
 
     def test_resolve_intrabar_bracket_exit_respects_conservative_same_bar(self) -> None:
         exit_price, exit_reason = resolve_intrabar_bracket_exit(

@@ -118,6 +118,12 @@ class Ie202603LiqSweepATests(unittest.TestCase):
         cfg = liq_sweep_a.BacktestConfig(initial_equity=100_000.0)
         high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
         low_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        high_pool.lvls = [1.10210]
+        high_pool.drawn_act = [True]
+        high_pool.state = [liq_sweep_a.ST_RED]
+        low_pool.lvls = [1.09900]
+        low_pool.drawn_act = [True]
+        low_pool.state = [liq_sweep_a.ST_PURPLE]
 
         def fake_exit_builder(side, entry_open, prev_low, prev_high, params_dict, entry=None):
             self.assertEqual(side, "long")
@@ -129,10 +135,11 @@ class Ie202603LiqSweepATests(unittest.TestCase):
             self.assertAlmostEqual(float(entry["atr"]), 0.001, places=8)
             return {"sl": 1.0995, "tp": 1.1020, "stop_dist": 0.001}
 
-        pending = liq_sweep_a._build_pending_entry_from_exit_override(  # pylint: disable=protected-access
+        entry_spec = liq_sweep_a._build_entry_spec_from_exit_override(  # pylint: disable=protected-access
             side="long",
             entry_index=5,
             entry_time=pd.Timestamp("2025-01-01T00:25:00Z"),
+            signal_price=1.1000,
             entry_open=1.1005,
             prev_low=1.0990,
             prev_high=1.1010,
@@ -149,12 +156,161 @@ class Ie202603LiqSweepATests(unittest.TestCase):
             sizing_params={},
         )
 
-        self.assertIsNotNone(pending)
-        self.assertEqual(pending["side"], "long")
-        self.assertAlmostEqual(float(pending["sl"]), 1.0995, places=8)
-        self.assertAlmostEqual(float(pending["tp"]), 1.1020, places=8)
-        self.assertAlmostEqual(float(pending["qty"]), 1_000_000.0, places=8)
-        self.assertAlmostEqual(float(pending["risk_dollars"]), 1_000.0, places=8)
+        self.assertIsNotNone(entry_spec)
+        self.assertEqual(entry_spec["side"], "long")
+        self.assertAlmostEqual(float(entry_spec["sl"]), 1.0995, places=8)
+        self.assertAlmostEqual(float(entry_spec["tp"]), 1.1020, places=8)
+        self.assertAlmostEqual(float(entry_spec["qty"]), 1_000_000.0, places=8)
+        self.assertAlmostEqual(float(entry_spec["risk_dollars"]), 1_000.0, places=8)
+
+    def test_exit_override_entry_builder_rejects_when_native_structural_rr_is_outside_band(self) -> None:
+        params = liq_sweep_a.Params(min_rr=1.0, max_rr=10.0, risk_pct=0.01)
+        cfg = liq_sweep_a.BacktestConfig(initial_equity=100_000.0)
+        high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        low_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        high_pool.lvls = [1.10090]
+        high_pool.drawn_act = [True]
+        high_pool.state = [liq_sweep_a.ST_RED]
+        low_pool.lvls = [1.09900]
+        low_pool.drawn_act = [True]
+        low_pool.state = [liq_sweep_a.ST_PURPLE]
+
+        def fake_exit_builder(side, entry_open, prev_low, prev_high, params_dict, entry=None):
+            del side, entry_open, prev_low, prev_high, params_dict, entry
+            return {"sl": 1.0995, "tp": 1.1020, "stop_dist": 0.001}
+
+        entry_spec = liq_sweep_a._build_entry_spec_from_exit_override(  # pylint: disable=protected-access
+            side="long",
+            entry_index=5,
+            entry_time=pd.Timestamp("2025-01-01T00:25:00Z"),
+            signal_price=1.1000,
+            entry_open=1.1005,
+            prev_low=1.0990,
+            prev_high=1.1010,
+            entry_atr=0.001,
+            high_pool=high_pool,
+            low_pool=low_pool,
+            strategy_params=params,
+            cfg=cfg,
+            equity=100_000.0,
+            exit_builder=fake_exit_builder,
+            exit_params={"rr": 1.5},
+            exit_supports_entry=True,
+            size_fn=None,
+            sizing_params={},
+        )
+
+        self.assertIsNone(entry_spec)
+
+    def test_exit_override_entry_builder_uses_actual_entry_open_for_structural_rr_gate(self) -> None:
+        params = liq_sweep_a.Params(min_rr=1.0, max_rr=10.0, risk_pct=0.01)
+        cfg = liq_sweep_a.BacktestConfig(initial_equity=100_000.0)
+        high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        low_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        high_pool.lvls = [1.10110]
+        high_pool.drawn_act = [True]
+        high_pool.state = [liq_sweep_a.ST_RED]
+        low_pool.lvls = [1.09900]
+        low_pool.drawn_act = [True]
+        low_pool.state = [liq_sweep_a.ST_PURPLE]
+
+        def fake_exit_builder(side, entry_open, prev_low, prev_high, params_dict, entry=None):
+            del side, entry_open, prev_low, prev_high, params_dict, entry
+            return {"sl": 1.0995, "tp": 1.1020, "stop_dist": 0.001}
+
+        entry_spec = liq_sweep_a._build_entry_spec_from_exit_override(  # pylint: disable=protected-access
+            side="long",
+            entry_index=5,
+            entry_time=pd.Timestamp("2025-01-01T00:25:00Z"),
+            signal_price=1.1000,
+            entry_open=1.1001,
+            prev_low=1.0990,
+            prev_high=1.1010,
+            entry_atr=0.001,
+            high_pool=high_pool,
+            low_pool=low_pool,
+            strategy_params=params,
+            cfg=cfg,
+            equity=100_000.0,
+            exit_builder=fake_exit_builder,
+            exit_params={"rr": 1.5},
+            exit_supports_entry=True,
+            size_fn=None,
+            sizing_params={},
+        )
+
+        self.assertIsNone(entry_spec)
+
+    def test_sweep_triggers_return_last_breached_red_levels(self) -> None:
+        high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        low_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        high_pool.lvls = [1.1010, 1.1020]
+        high_pool.drawn_act = [True, True]
+        high_pool.state = [liq_sweep_a.ST_RED, liq_sweep_a.ST_RED]
+        low_pool.lvls = [1.0990, 1.0980]
+        low_pool.drawn_act = [True, True]
+        low_pool.state = [liq_sweep_a.ST_RED, liq_sweep_a.ST_RED]
+
+        short_entry_price, long_entry_price = liq_sweep_a.sweep_triggers(
+            high_pool,
+            low_pool,
+            high_val=1.1030,
+            low_val=1.0970,
+            event_time=pd.Timestamp("2025-01-01T00:25:00Z"),
+        )
+
+        self.assertAlmostEqual(float(short_entry_price), 1.1020, places=8)
+        self.assertAlmostEqual(float(long_entry_price), 1.0980, places=8)
+        self.assertEqual(high_pool.drawn_act, [False, False])
+        self.assertEqual(low_pool.drawn_act, [False, False])
+
+    def test_run_backtest_enters_immediately_on_breach_bar_at_red_line_price(self) -> None:
+        idx = pd.DatetimeIndex([pd.Timestamp("2025-01-01T00:00:00Z")])
+        df = pd.DataFrame(
+            {
+                "open": [1.1002],
+                "high": [1.1004],
+                "low": [1.0988],
+                "close": [1.0996],
+            },
+            index=idx,
+        )
+        params = liq_sweep_a.Params()
+        captured: dict[str, float | int] = {}
+
+        def fake_build_entry_spec(**kwargs):
+            captured["entry_price"] = float(kwargs["entry_price"])
+            captured["entry_index"] = int(kwargs["entry_index"])
+            return {
+                "side": "short",
+                "qty": 1.0,
+                "sl": 1.1010,
+                "tp": 1.0990,
+                "risk_dollars": 100.0,
+            }
+
+        with mock.patch.multiple(
+            liq_sweep_a,
+            track_breach_high=lambda *args, **kwargs: None,
+            track_breach_low=lambda *args, **kwargs: None,
+            append_high_pivot=lambda *args, **kwargs: None,
+            append_low_pivot=lambda *args, **kwargs: None,
+            confirm_move_away_high=lambda *args, **kwargs: None,
+            confirm_move_away_low=lambda *args, **kwargs: None,
+            stop_extending_high=lambda *args, **kwargs: None,
+            stop_extending_low=lambda *args, **kwargs: None,
+            sweep_triggers=lambda *args, **kwargs: (1.1000, None),
+            _build_entry_spec=fake_build_entry_spec,
+        ):
+            _equity_df, trades_df, summary = liq_sweep_a.run_backtest(df, strategy_params=params)
+
+        self.assertEqual(captured, {"entry_price": 1.1, "entry_index": 0})
+        self.assertEqual(len(trades_df), 1)
+        self.assertEqual(pd.Timestamp(trades_df.iloc[0]["entry_time"]), idx[0])
+        self.assertAlmostEqual(float(trades_df.iloc[0]["entry"]), 1.1000, places=8)
+        self.assertAlmostEqual(float(trades_df.iloc[0]["exit"]), 1.0990, places=8)
+        self.assertEqual(str(trades_df.iloc[0]["side"]), "short")
+        self.assertEqual(int(summary["trades"]), 1)
 
     def test_entry_plugin_exposes_full_system_rerun_bridge(self) -> None:
         from quantbt.plugins.entries import interequity_liqsweep_entry

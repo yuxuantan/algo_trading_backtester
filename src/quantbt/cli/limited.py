@@ -1,14 +1,14 @@
 """
 CLI wrapper for spec-driven limited tests.
 
-Example (entry-only: SMA grid + fixed ATR exit):
+Example (entry-only: SMA grid + fixed pip stop/target exit):
 python scripts/run_limited_tests.py \
   --strategy quantbt.strategies.sma_cross_strategy \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin sma_cross \
   --entry-params '{"fast":[10,20,30,40,50,60,70,80,90,100],"slow":[100,125,150,175,200,225,250,275,300,325]}' \
-  --exit-plugin atr_brackets \
-  --exit-params '{"rr":2.0,"sldist_atr_mult":1.5,"atr_period":14}' \
+  --exit-plugin fixed_pips_brackets \
+  --exit-params '{"rr":2.0,"stop_pips":20.0,"pip_size":0.0001}' \
   --commission-rt 5
 
 Example (entry-only: SMA grid + time stop exit):
@@ -28,8 +28,8 @@ python scripts/run_limited_tests.py \
   --entry-plugin donchian_breakout \
   --entry-params '{"lookback":[20]}' \
   --favourable-criteria '{"total_return_%":{">":0}}' \
-  --exit-plugin atr_brackets \
-  --exit-params '{"rr":[1.0,1.5,2.0,2.5,3.0],"sldist_atr_mult":[0.5,1.0,1.5,2.0,2.5,3.0],"atr_period":14}' \
+  --exit-plugin fixed_pips_brackets \
+  --exit-params '{"rr":[1.0,1.5,2.0,2.5,3.0],"stop_pips":[10.0,15.0,20.0,25.0,30.0],"pip_size":0.0001}' \
   --commission-rt 5
 
 Example (monkey entry: random 132 entry signals, keep strategy exit):

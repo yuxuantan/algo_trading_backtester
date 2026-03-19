@@ -220,8 +220,8 @@ python3 scripts/run_limited_tests.py \
   --data data/processed/eurusd_1h_20100101_20130101_dukascopy_python.csv \
   --entry-plugin donchian_breakout \
   --entry-params '{"lookback":[20]}' \
-  --exit-plugin atr_brackets \
-  --exit-params '{"rr":[1.0,1.5,2.0,2.5,3.0],"sldist_atr_mult":[0.5,1.0,1.5,2.0,2.5,3.0],"atr_period":14}' \
+  --exit-plugin fixed_pips_brackets \
+  --exit-params '{"rr":[1.0,1.5,2.0,2.5,3.0],"stop_pips":[10.0,15.0,20.0,25.0,30.0],"pip_size":0.0001}' \
   --commission-rt 5
 ```
 
@@ -243,7 +243,7 @@ Run core test, then read latest core result row:
 ```bash
 python3 - <<'PY'
 import glob, os, pandas as pd
-root = "runs/limited/sma_cross_strategy/eurusd_1h_20100101_20130101/core_system_test__sma_cross__fixed_atr_exit"
+root = "runs/limited/sma_cross_strategy/eurusd_1h_20100101_20130101/core_system_test__sma_cross__fixed_pips_exit"
 latest = max(glob.glob(os.path.join(root, "run_*")), key=os.path.getmtime)
 row = pd.read_csv(os.path.join(latest, "limited_results.csv")).iloc[0]
 print("core_path:", latest)

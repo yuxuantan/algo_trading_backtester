@@ -558,14 +558,15 @@ def sweep_triggers(
     *,
     event_time: pd.Timestamp,
     line_events: list[dict[str, Any]] | None = None,
-) -> tuple[bool, bool]:
-    trig_short = False
-    trig_long = False
+) -> tuple[float | None, float | None]:
+    short_entry_price: float | None = None
+    long_entry_price: float | None = None
 
     for i in range(len(high_pool.lvls)):
         if high_pool.drawn_act[i] and high_val > high_pool.lvls[i]:
             if high_pool.state[i] == ST_RED:
-                trig_short = True
+                lvl = float(high_pool.lvls[i])
+                short_entry_price = lvl if short_entry_price is None else max(short_entry_price, lvl)
             high_pool.drawn_act[i] = False
             if line_events is not None:
                 line_events.append(
@@ -581,7 +582,8 @@ def sweep_triggers(
     for i in range(len(low_pool.lvls)):
         if low_pool.drawn_act[i] and low_val < low_pool.lvls[i]:
             if low_pool.state[i] == ST_RED:
-                trig_long = True
+                lvl = float(low_pool.lvls[i])
+                long_entry_price = lvl if long_entry_price is None else min(long_entry_price, lvl)
             low_pool.drawn_act[i] = False
             if line_events is not None:
                 line_events.append(
@@ -594,7 +596,7 @@ def sweep_triggers(
                     }
                 )
 
-    return trig_short, trig_long
+    return short_entry_price, long_entry_price
 
 
 def next_purple_high_above(price: float, high_pool: _LevelPool) -> float | None:
@@ -694,11 +696,63 @@ def build_brackets_from_signal(
     )
 
 
-def _build_pending_entry_from_exit_override(
+def _structural_entry_gate(
+    *,
+    side: str,
+    entry_price: float,
+    high_pool: _LevelPool,
+    low_pool: _LevelPool,
+    strategy_params: InterEquityLiqSweepParams,
+) -> dict[str, float] | None:
+    sl_buffer = float(strategy_params.sl_buffer_pips) * float(strategy_params.pip_size)
+    rr_band_valid = float(strategy_params.max_rr) > float(strategy_params.min_rr)
+    if not rr_band_valid:
+        return None
+
+    if side == "short":
+        sl_raw = next_purple_high_above(entry_price, high_pool)
+        sl = (sl_raw + sl_buffer) if sl_raw is not None else None
+        tp = next_red_below(entry_price, high_pool, low_pool)
+        ok_sl = sl is not None and sl > entry_price
+        ok_tp = tp is not None and tp < entry_price
+        risk_dist = (sl - entry_price) if ok_sl else math.nan
+        reward_dist = (entry_price - tp) if ok_tp and tp is not None else math.nan
+    elif side == "long":
+        sl_raw = next_purple_low_below(entry_price, low_pool)
+        sl = (sl_raw - sl_buffer) if sl_raw is not None else None
+        tp = next_red_above(entry_price, high_pool, low_pool)
+        ok_sl = sl is not None and sl < entry_price
+        ok_tp = tp is not None and tp > entry_price
+        risk_dist = (entry_price - sl) if ok_sl else math.nan
+        reward_dist = (tp - entry_price) if ok_tp and tp is not None else math.nan
+    else:
+        raise ValueError("side must be 'long' or 'short'")
+
+    rr = (
+        reward_dist / risk_dist
+        if math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist)
+        else math.nan
+    )
+    ok_rr = math.isfinite(rr) and rr > float(strategy_params.min_rr) and rr <= float(strategy_params.max_rr)
+    has_red_between = any_red_between(entry_price, sl, high_pool, low_pool) if ok_sl and sl is not None else True
+    if not (ok_sl and ok_tp and ok_rr and not has_red_between and sl is not None and tp is not None):
+        return None
+
+    return {
+        "sl": float(sl),
+        "tp": float(tp),
+        "risk_dist": float(risk_dist),
+        "reward_dist": float(reward_dist),
+        "rr": float(rr),
+    }
+
+
+def _build_entry_spec_from_exit_override(
     *,
     side: str,
     entry_index: int,
     entry_time: pd.Timestamp,
+    signal_price: float,
     entry_open: float,
     prev_low: float,
     prev_high: float,
@@ -714,6 +768,17 @@ def _build_pending_entry_from_exit_override(
     size_fn=None,
     sizing_params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    del signal_price
+    structural_gate = _structural_entry_gate(
+        side=side,
+        entry_price=float(entry_open),
+        high_pool=high_pool,
+        low_pool=low_pool,
+        strategy_params=strategy_params,
+    )
+    if structural_gate is None:
+        return None
+
     entry_ctx: dict[str, Any] = {
         "entry_i": int(entry_index),
         "entry_time": pd.Timestamp(entry_time),
@@ -767,14 +832,7 @@ def _build_pending_entry_from_exit_override(
     else:
         raise ValueError("side must be 'long' or 'short'")
 
-    rr = (
-        reward_dist / risk_dist
-        if math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist)
-        else math.nan
-    )
-    ok_rr = math.isfinite(rr) and rr > float(strategy_params.min_rr) and rr <= float(strategy_params.max_rr)
-    has_red_between = any_red_between(entry_open, sl, high_pool, low_pool) if ok_sl else True
-    if not (ok_sl and ok_tp and ok_rr and not has_red_between):
+    if not (ok_sl and ok_tp):
         return None
 
     sizing_params = dict(sizing_params or {})
@@ -829,30 +887,24 @@ def _close_pending_market_exit(
     return equity_after, None, None, trade
 
 
-def _fill_pending_entry(
+def _open_position_from_entry_spec(
     *,
-    pos: dict[str, Any] | None,
-    pending_entry: dict[str, Any] | None,
-    bar_index: int,
-    bar_open: float,
-    bar_time: pd.Timestamp,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    if pos is not None or pending_entry is None or int(pending_entry["entry_i"]) != bar_index:
-        return pos, pending_entry
-
-    pos = {
-        "side": pending_entry["side"],
-        "entry": bar_open,
-        "sl": float(pending_entry["sl"]),
-        "tp": float(pending_entry["tp"]),
-        "units": float(pending_entry["qty"]),
-        "entry_time": bar_time,
-        "risk_dollars": float(pending_entry["risk_dollars"]),
+    entry_spec: dict[str, Any],
+    entry_price: float,
+    entry_time: pd.Timestamp,
+) -> dict[str, Any]:
+    return {
+        "side": str(entry_spec["side"]),
+        "entry": float(entry_price),
+        "sl": float(entry_spec["sl"]),
+        "tp": float(entry_spec["tp"]),
+        "units": float(entry_spec["qty"]),
+        "entry_time": pd.Timestamp(entry_time),
+        "risk_dollars": float(entry_spec["risk_dollars"]),
     }
-    return pos, None
 
 
-def _build_pending_entry(
+def _build_entry_spec(
     *,
     side: str,
     entry_index: int,
@@ -862,42 +914,20 @@ def _build_pending_entry(
     strategy_params: InterEquityLiqSweepParams,
     cfg: BacktestConfig,
 ) -> dict[str, Any] | None:
-    sl_buffer = float(strategy_params.sl_buffer_pips) * float(strategy_params.pip_size)
-    rr_band_valid = float(strategy_params.max_rr) > float(strategy_params.min_rr)
-    if not rr_band_valid:
-        return None
-
-    if side == "short":
-        sl_raw = next_purple_high_above(entry_price, high_pool)
-        sl = (sl_raw + sl_buffer) if sl_raw is not None else None
-        tp = next_red_below(entry_price, high_pool, low_pool)
-        ok_sl = sl is not None and sl > entry_price
-        ok_tp = tp is not None and tp < entry_price
-        risk_dist = (sl - entry_price) if ok_sl else math.nan
-        reward_dist = (entry_price - tp) if ok_tp and tp is not None else math.nan
-    elif side == "long":
-        sl_raw = next_purple_low_below(entry_price, low_pool)
-        sl = (sl_raw - sl_buffer) if sl_raw is not None else None
-        tp = next_red_above(entry_price, high_pool, low_pool)
-        ok_sl = sl is not None and sl < entry_price
-        ok_tp = tp is not None and tp > entry_price
-        risk_dist = (entry_price - sl) if ok_sl else math.nan
-        reward_dist = (tp - entry_price) if ok_tp and tp is not None else math.nan
-    else:
-        raise ValueError("side must be 'long' or 'short'")
-
-    rr = (
-        reward_dist / risk_dist
-        if math.isfinite(risk_dist) and risk_dist > 0 and math.isfinite(reward_dist)
-        else math.nan
+    structural_gate = _structural_entry_gate(
+        side=side,
+        entry_price=float(entry_price),
+        high_pool=high_pool,
+        low_pool=low_pool,
+        strategy_params=strategy_params,
     )
-    ok_rr = math.isfinite(rr) and rr > float(strategy_params.min_rr) and rr <= float(strategy_params.max_rr)
-    has_red_between = any_red_between(entry_price, sl, high_pool, low_pool) if ok_sl and sl is not None else True
-    if not (ok_sl and ok_tp and ok_rr and not has_red_between and sl is not None and tp is not None):
+    if structural_gate is None:
         return None
 
     risk_amount = float(cfg.initial_equity) * float(strategy_params.risk_pct)
-    stop_dist = max(abs(float(entry_price) - float(sl)), float(strategy_params.min_tick))
+    sl = float(structural_gate["sl"])
+    tp = float(structural_gate["tp"])
+    stop_dist = max(abs(float(entry_price) - sl), float(strategy_params.min_tick))
     qty = risk_amount / stop_dist
     if not math.isfinite(qty) or qty <= 0:
         return None
@@ -968,7 +998,6 @@ def run_backtest(
     trades: list[dict[str, Any]] = []
 
     pos: dict[str, Any] | None = None
-    pending_entry: dict[str, Any] | None = None
     pending_market_exit: dict[str, Any] | None = None
     line_events: list[dict[str, Any]] = []
 
@@ -1001,14 +1030,6 @@ def run_backtest(
         if trade is not None:
             trades.append(trade)
 
-        pos, pending_entry = _fill_pending_entry(
-            pos=pos,
-            pending_entry=pending_entry,
-            bar_index=i,
-            bar_open=o,
-            bar_time=t,
-        )
-
         if pos is not None:
             exit_price, exit_reason = resolve_intrabar_bracket_exit(
                 side=str(pos["side"]),
@@ -1030,8 +1051,6 @@ def run_backtest(
                 trades.append(trade)
                 pos = None
                 pending_market_exit = None
-
-        equity_curve.append({"time": t, "equity": equity})
 
         tr = true_range(h, l, prev_close)
         atr = tr if prev_atr is None else ((prev_atr * (int(p.atr_len) - 1)) + tr) / int(p.atr_len)
@@ -1055,8 +1074,8 @@ def run_backtest(
             pivot_time = time_hist[center_idx]
             pivot_atr = float(atr_hist[center_idx])
 
-        trig_short = False
-        trig_long = False
+        short_entry_price: float | None = None
+        long_entry_price: float | None = None
 
         if bool(p.show_levels):
             track_breach_high(high_pool, h, t)
@@ -1102,7 +1121,7 @@ def run_backtest(
                 event_time=t,
                 line_events=line_events,
             )
-            trig_short, trig_long = sweep_triggers(
+            short_entry_price, long_entry_price = sweep_triggers(
                 high_pool,
                 low_pool,
                 h,
@@ -1125,20 +1144,19 @@ def run_backtest(
                 line_events=line_events,
             )
 
-        flat = pos is None
-        entry_px = c
+        opened_this_bar = False
 
-        if flat and trig_short and i < len(df) - 1:
+        if pos is None and short_entry_price is not None:
             if exit_override_active:
-                t_next = idx[i + 1]
                 entry_atr = None
                 if override_atr_series is not None:
-                    entry_atr = float(override_atr_series.at[t_next])
-                pending_entry = _build_pending_entry_from_exit_override(
+                    entry_atr = float(override_atr_series.at[t])
+                entry_spec = _build_entry_spec_from_exit_override(
                     side="short",
-                    entry_index=i + 1,
-                    entry_time=t_next,
-                    entry_open=float(df.at[t_next, "open"]),
+                    entry_index=i,
+                    entry_time=t,
+                    signal_price=float(short_entry_price),
+                    entry_open=float(short_entry_price),
                     prev_low=l,
                     prev_high=h,
                     entry_atr=entry_atr,
@@ -1154,27 +1172,34 @@ def run_backtest(
                     sizing_params=sizing_override_params,
                 )
             else:
-                pending_entry = _build_pending_entry(
+                entry_spec = _build_entry_spec(
                     side="short",
-                    entry_index=i + 1,
-                    entry_price=entry_px,
+                    entry_index=i,
+                    entry_price=float(short_entry_price),
                     high_pool=high_pool,
                     low_pool=low_pool,
                     strategy_params=p,
                     cfg=cfg,
                 )
+            if entry_spec is not None:
+                pos = _open_position_from_entry_spec(
+                    entry_spec=entry_spec,
+                    entry_price=float(short_entry_price),
+                    entry_time=t,
+                )
+                opened_this_bar = True
 
-        if flat and pending_entry is None and trig_long and i < len(df) - 1:
+        if pos is None and long_entry_price is not None:
             if exit_override_active:
-                t_next = idx[i + 1]
                 entry_atr = None
                 if override_atr_series is not None:
-                    entry_atr = float(override_atr_series.at[t_next])
-                pending_entry = _build_pending_entry_from_exit_override(
+                    entry_atr = float(override_atr_series.at[t])
+                entry_spec = _build_entry_spec_from_exit_override(
                     side="long",
-                    entry_index=i + 1,
-                    entry_time=t_next,
-                    entry_open=float(df.at[t_next, "open"]),
+                    entry_index=i,
+                    entry_time=t,
+                    signal_price=float(long_entry_price),
+                    entry_open=float(long_entry_price),
                     prev_low=l,
                     prev_high=h,
                     entry_atr=entry_atr,
@@ -1190,25 +1215,55 @@ def run_backtest(
                     sizing_params=sizing_override_params,
                 )
             else:
-                pending_entry = _build_pending_entry(
+                entry_spec = _build_entry_spec(
                     side="long",
-                    entry_index=i + 1,
-                    entry_price=entry_px,
+                    entry_index=i,
+                    entry_price=float(long_entry_price),
                     high_pool=high_pool,
                     low_pool=low_pool,
                     strategy_params=p,
                     cfg=cfg,
                 )
+            if entry_spec is not None:
+                pos = _open_position_from_entry_spec(
+                    entry_spec=entry_spec,
+                    entry_price=float(long_entry_price),
+                    entry_time=t,
+                )
+                opened_this_bar = True
+
+        if opened_this_bar and pos is not None:
+            exit_price, exit_reason = resolve_intrabar_bracket_exit(
+                side=str(pos["side"]),
+                bar_high=h,
+                bar_low=l,
+                sl=float(pos["sl"]),
+                tp=float(pos["tp"]),
+                conservative_same_bar=bool(cfg.conservative_same_bar),
+            )
+            if exit_price is not None:
+                equity, trade = close_trade_with_costs(
+                    pos=pos,
+                    exit_price=float(exit_price),
+                    exit_time=t,
+                    exit_reason=str(exit_reason),
+                    equity_now=equity,
+                    cfg=cfg,
+                )
+                trades.append(trade)
+                pos = None
 
         if not exit_override_active and i < len(df) - 1:
             pending_market_exit = _schedule_force_exit(
                 pos=pos,
                 pending_market_exit=pending_market_exit,
-                entry_price=entry_px,
+                entry_price=c,
                 high_pool=high_pool,
                 low_pool=low_pool,
                 next_bar_index=i + 1,
             )
+
+        equity_curve.append({"time": t, "equity": equity})
 
     equity_df = pd.DataFrame(equity_curve).set_index("time") if equity_curve else pd.DataFrame(columns=["equity"])
     trades_df = pd.DataFrame(trades)

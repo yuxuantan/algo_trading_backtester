@@ -54,10 +54,10 @@ def infer_test_name(strategy_spec: dict, *, test_focus: str) -> str:
 
     exit_style_map = {
         "atr_brackets": "fixed_atr_exit",
+        "fixed_pips_brackets": "fixed_pips_exit",
         "time_exit": "time_exit",
         "random_time_exit": "random_exit",
         "monkey_exit": "monkey_exit",
     }
     exit_tag = exit_style_map.get(exit_name, f"{exit_name}_exit")
     return f"{test_focus}__{entry_tag}__{exit_tag}"
-

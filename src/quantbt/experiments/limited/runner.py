@@ -504,7 +504,10 @@ def run_spec(spec: dict, *, progress_every: int = 10):
         trades_df = pd.concat(trade_rows, ignore_index=True)
         trades_df.to_csv(limited_trades_path(run_dir), index=False)
 
-    pass_rate = limited_test_pass_rate(res_df)
+    pass_rate = limited_test_pass_rate(res_df, min_trades=min_trades)
+    trades_series = pd.to_numeric(res_df.get("trades", pd.Series(dtype=float)), errors="coerce")
+    valid_iters = int((trades_series >= min_trades).sum()) if not trades_series.empty else 0
+    required_valid_iters = 100
     davey_return_worse_pct = (
         float((100.0 * davey_return_worse_count / len(res_df)))
         if monkey_davey_enabled and len(res_df) > 0
@@ -523,13 +526,15 @@ def run_spec(spec: dict, *, progress_every: int = 10):
             and davey_dd_worse_pct >= pass_threshold
         )
         if monkey_davey_enabled
-        else bool(pass_rate >= pass_threshold)
+        else bool(pass_rate >= pass_threshold and valid_iters >= required_valid_iters)
     )
     pass_summary = {
         "favourable_pct": pass_rate,
         "pass_threshold_%": pass_threshold,
         "passed": pass_decision,
         "total_iters": int(len(res_df)),
+        "valid_iters": valid_iters,
+        "required_valid_iters": required_valid_iters,
         "attempted_iters": int(attempt_count) if attempt_count else int(total),
         "prefilter_rejects": int(prefilter_reject_count),
         "min_trades": min_trades,

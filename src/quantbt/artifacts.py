@@ -323,6 +323,8 @@ def infer_limited_scenario_slug(strategy_spec: dict[str, Any], *, test_focus: st
             return "entry_fixed_bar_exit"
         if exit_name == "atr_brackets":
             return "entry_fixed_atr_exit"
+        if exit_name == "fixed_pips_brackets":
+            return "entry_fixed_pips_exit"
         return f"entry_test__{safe_slug(exit_name or test_name or 'custom_exit')}"
 
     return safe_slug(test_name or "limited_test")

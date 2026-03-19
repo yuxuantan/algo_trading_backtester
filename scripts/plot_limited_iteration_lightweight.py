@@ -21,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from quantbt.artifacts import limited_trades_path
 from quantbt.core.engine import BacktestConfig
 from quantbt.experiments.limited.data_prep import load_price_frame
 
@@ -135,6 +136,19 @@ def _build_backtest_cfg(run_meta: dict[str, Any]) -> BacktestConfig:
     valid_fields = set(BacktestConfig.__dataclass_fields__.keys())
     filtered = {k: v for k, v in cfg_raw.items() if k in valid_fields}
     return BacktestConfig(**filtered)
+
+
+def _load_iteration_trades(run_dir: Path, *, iter_id: int) -> pd.DataFrame:
+    trades_path = limited_trades_path(run_dir)
+    if not trades_path.exists():
+        return pd.DataFrame()
+
+    trades = pd.read_csv(trades_path)
+    if "iter" not in trades.columns:
+        return pd.DataFrame()
+
+    iter_mask = pd.to_numeric(trades["iter"], errors="coerce") == int(iter_id)
+    return trades.loc[iter_mask].copy()
 
 
 def _segments_from_events(events: list[dict[str, Any]], fallback_end: pd.Timestamp) -> list[dict[str, Any]]:
@@ -434,10 +448,133 @@ def _normalize_trades_for_plot(trades: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _first_finite_metric(iter_row: pd.Series | None, *keys: str) -> float:
+    if iter_row is None:
+        return float("nan")
+    for key in keys:
+        raw = iter_row.get(key)
+        val = pd.to_numeric(pd.Series([raw]), errors="coerce").iloc[0]
+        if pd.notna(val) and math.isfinite(float(val)):
+            return float(val)
+    return float("nan")
+
+
+def _trade_pnl_series(bt_trades: pd.DataFrame) -> pd.Series:
+    if bt_trades.empty or "pnl" not in bt_trades.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(bt_trades["pnl"], errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+
+
+def _fmt_metric_value(value: float, *, kind: str) -> str:
+    if kind == "ratio" and math.isinf(value):
+        return "inf"
+    if not math.isfinite(value):
+        return "n/a"
+    if kind == "currency":
+        return f"{value:,.2f}"
+    if kind == "percent":
+        return f"{value:.2f}%"
+    if kind == "integer":
+        return f"{int(round(value)):,d}"
+    if kind == "ratio":
+        return f"{value:.2f}"
+    return f"{value:.2f}"
+
+
+def _build_summary_metrics(iter_row: pd.Series | None, bt_trades: pd.DataFrame) -> list[dict[str, str]]:
+    pnl_s = _trade_pnl_series(bt_trades)
+    trade_count = _first_finite_metric(iter_row, "trades")
+    if not math.isfinite(trade_count):
+        trade_count = float(len(bt_trades))
+
+    net_profit = _first_finite_metric(iter_row, "_net_profit_abs", "net_profit_abs", "net_profit")
+    if not math.isfinite(net_profit) and not pnl_s.empty:
+        net_profit = float(pnl_s.sum())
+
+    total_return = _first_finite_metric(iter_row, "total_return_%")
+    win_rate = _first_finite_metric(iter_row, "win_rate_%")
+    if not math.isfinite(win_rate) and not pnl_s.empty:
+        win_rate = float((pnl_s > 0).mean() * 100.0)
+
+    max_dd = _first_finite_metric(iter_row, "max_drawdown_abs_%", "max_drawdown_%")
+    profit_factor = _first_finite_metric(iter_row, "profit_factor")
+    if not math.isfinite(profit_factor) and not pnl_s.empty:
+        gross_profit = float(pnl_s[pnl_s > 0].sum())
+        gross_loss = float((-pnl_s[pnl_s < 0]).sum())
+        if gross_loss > 0:
+            profit_factor = float(gross_profit / gross_loss)
+        elif gross_profit > 0:
+            profit_factor = float("inf")
+
+    avg_trade = _first_finite_metric(iter_row, "avg_trade_net_profit_abs")
+    if not math.isfinite(avg_trade) and not pnl_s.empty:
+        avg_trade = float(pnl_s.mean())
+
+    favourable = iter_row.get("favourable") if iter_row is not None else None
+    favourable_text = ""
+    if isinstance(favourable, str):
+        favourable_text = favourable.strip().lower()
+    elif favourable is not None and not pd.isna(favourable):
+        favourable_text = str(bool(favourable)).lower()
+    favourable_label = "n/a"
+    favourable_tone = "neutral"
+    if favourable_text in {"true", "1", "yes"}:
+        favourable_label = "Yes"
+        favourable_tone = "positive"
+    elif favourable_text in {"false", "0", "no"}:
+        favourable_label = "No"
+        favourable_tone = "negative"
+
+    metrics = [
+        {
+            "label": "Net P&L",
+            "value": _fmt_metric_value(net_profit, kind="currency"),
+            "tone": "positive" if math.isfinite(net_profit) and net_profit > 0 else "negative" if math.isfinite(net_profit) and net_profit < 0 else "neutral",
+        },
+        {
+            "label": "Return %",
+            "value": _fmt_metric_value(total_return, kind="percent"),
+            "tone": "positive" if math.isfinite(total_return) and total_return > 0 else "negative" if math.isfinite(total_return) and total_return < 0 else "neutral",
+        },
+        {
+            "label": "Trades",
+            "value": _fmt_metric_value(trade_count, kind="integer"),
+            "tone": "neutral",
+        },
+        {
+            "label": "Win Rate",
+            "value": _fmt_metric_value(win_rate, kind="percent"),
+            "tone": "positive" if math.isfinite(win_rate) and win_rate >= 50.0 else "negative" if math.isfinite(win_rate) else "neutral",
+        },
+        {
+            "label": "Avg Trade",
+            "value": _fmt_metric_value(avg_trade, kind="currency"),
+            "tone": "positive" if math.isfinite(avg_trade) and avg_trade > 0 else "negative" if math.isfinite(avg_trade) and avg_trade < 0 else "neutral",
+        },
+        {
+            "label": "Profit Factor",
+            "value": _fmt_metric_value(profit_factor, kind="ratio"),
+            "tone": "positive" if math.isfinite(profit_factor) and profit_factor > 1.0 else "negative" if math.isfinite(profit_factor) and profit_factor <= 1.0 else "neutral",
+        },
+        {
+            "label": "Max DD %",
+            "value": _fmt_metric_value(max_dd, kind="percent"),
+            "tone": "negative" if math.isfinite(max_dd) and max_dd > 0 else "neutral",
+        },
+        {
+            "label": "Favourable",
+            "value": favourable_label,
+            "tone": favourable_tone,
+        },
+    ]
+    return metrics
+
+
 def _build_payload(
     *,
     chart_df: pd.DataFrame,
     bt_trades: pd.DataFrame,
+    iter_row: pd.Series | None,
     line_segments: list[dict[str, Any]],
     title: str,
     include_black_lines: bool,
@@ -496,7 +633,7 @@ def _build_payload(
         tr_plot = _normalize_trades_for_plot(table_source)
         tr_plot = tr_plot.dropna(subset=["entry_time", "exit_time"])
 
-        for _, row in tr_plot.iterrows():
+        for trade_idx, (_, row) in enumerate(tr_plot.iterrows()):
             side = str(row.get("side", "")).lower()
             et = _to_unix_s(row.get("entry_time"))
             xt = _to_unix_s(row.get("exit_time"))
@@ -551,6 +688,7 @@ def _build_payload(
             if math.isfinite(float(sl)):
                 bracket_lines.append(
                     {
+                        "id": f"sl-{trade_idx}",
                         "start": et,
                         "end": draw_end,
                         "level": float(sl),
@@ -562,6 +700,7 @@ def _build_payload(
             if math.isfinite(float(tp)):
                 bracket_lines.append(
                     {
+                        "id": f"tp-{trade_idx}",
                         "start": et,
                         "end": draw_end,
                         "level": float(tp),
@@ -574,6 +713,7 @@ def _build_payload(
             if math.isfinite(float(entry_px)) and math.isfinite(float(tp)):
                 trade_boxes.append(
                     {
+                        "id": f"tp-box-{trade_idx}",
                         "start": et,
                         "end": draw_end,
                         "base": float(entry_px),
@@ -587,6 +727,7 @@ def _build_payload(
             if math.isfinite(float(entry_px)) and math.isfinite(float(sl)):
                 trade_boxes.append(
                     {
+                        "id": f"sl-box-{trade_idx}",
                         "start": et,
                         "end": draw_end,
                         "base": float(entry_px),
@@ -650,8 +791,10 @@ def _build_payload(
         "liq_lines": liq_lines,
         "bracket_lines": bracket_lines,
         "trade_boxes": trade_boxes,
+        "max_visible_trade_artifacts": 240,
         "trade_columns": trade_columns,
         "trade_rows": trade_rows,
+        "summary_metrics": _build_summary_metrics(iter_row, bt_trades),
         "state_legend": [{"state": k, "label": v, "color": STATE_COLORS[k]} for k, v in STATE_LABEL.items()],
     }
 
@@ -675,7 +818,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     }}
     .wrap {{
       display: grid;
-      grid-template-rows: auto auto auto 52vh minmax(220px, 1fr);
+      grid-template-rows: auto auto auto auto 52vh minmax(220px, 1fr);
       gap: 8px;
       height: 100vh;
       padding: 10px 12px;
@@ -740,6 +883,49 @@ def _build_html(payload: dict[str, Any]) -> str:
     }}
     .replay-btn:hover {{
       background: #f1f5f9;
+    }}
+    .replay-btn.active {{
+      background: #dbeafe;
+      border-color: #60a5fa;
+      color: #1d4ed8;
+    }}
+    .replay-hint {{
+      color: #0369a1;
+      font-weight: 600;
+    }}
+    .summary-strip {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+    }}
+    .summary-card {{
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 8px 10px;
+      min-width: 0;
+    }}
+    .summary-label {{
+      font-size: 11px;
+      font-weight: 600;
+      color: #64748b;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }}
+    .summary-value {{
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f172a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .summary-card.positive .summary-value {{
+      color: #15803d;
+    }}
+    .summary-card.negative .summary-value {{
+      color: #b91c1c;
     }}
     #chart {{
       width: 100%;
@@ -819,6 +1005,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     <div class="legend" id="legend"></div>
     <div class="replay-controls">
       <span>Replay</span>
+      <button class="replay-btn" id="replay-jump-to-click" type="button">Replay To Click</button>
       <button class="replay-btn" id="replay-step-forward" type="button">+1 Bar</button>
       <button class="replay-btn" id="replay-refresh-lines" type="button">Refresh Lines</button>
       <label class="replay-toggle" for="replay-performance-mode">
@@ -827,6 +1014,7 @@ def _build_html(payload: dict[str, Any]) -> str:
       </label>
       <span class="replay-time" id="replay-time"></span>
     </div>
+    <div class="summary-strip" id="summary-strip"></div>
     <div id="chart"></div>
     <div class="trades-box">
       <div class="trades-title">Trades (click entry/exit time to center chart)</div>
@@ -857,6 +1045,17 @@ def _build_html(payload: dict[str, Any]) -> str:
     hoverInfo.className = "hover-info";
     hoverInfo.id = "hover-info";
     legendEl.appendChild(hoverInfo);
+    const summaryStripEl = document.getElementById("summary-strip");
+    for (const metric of (data.summary_metrics || [])) {{
+      const card = document.createElement("div");
+      const tone = String(metric.tone || "neutral").trim();
+      card.className = `summary-card ${{tone}}`;
+      card.innerHTML = `
+        <div class="summary-label">${{metric.label || ""}}</div>
+        <div class="summary-value">${{metric.value || "n/a"}}</div>
+      `;
+      summaryStripEl.appendChild(card);
+    }}
 
     const chartContainer = document.getElementById("chart");
     const chart = LightweightCharts.createChart(chartContainer, {{
@@ -921,6 +1120,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     }}
     const loadChunk = Math.max(100, Number(data.lazy_load_chunk || 1000));
     const maxVisibleLiq = Math.max(100, Number(data.max_visible_liq_lines || 250));
+    const maxVisibleTradeArtifacts = Math.max(40, Number(data.max_visible_trade_artifacts || 240));
     const replayZoomBars = Math.max(
       24,
       Math.min(140, Math.floor(Number(data.focus_window_bars || 240) * 0.35))
@@ -928,11 +1128,14 @@ def _build_html(payload: dict[str, Any]) -> str:
     const atrLen = Math.max(5, Math.min(50, Number(data.atr_len || 14)));
 
     const replayStepForwardEl = document.getElementById("replay-step-forward");
+    const replayJumpToClickEl = document.getElementById("replay-jump-to-click");
     const replayRefreshLinesEl = document.getElementById("replay-refresh-lines");
     const replayPerfModeEl = document.getElementById("replay-performance-mode");
     const replayTimeEl = document.getElementById("replay-time");
     replayStepForwardEl.title = "Step +1 bar (Shift+Right)";
+    replayJumpToClickEl.title = "Arm replay-to-click mode, then click a bar on the chart";
     let performanceMode = true;
+    let replayClickArmed = false;
     let replayIdx = allCandles.length > 0
       ? Math.max(0, Math.min(allCandles.length - 1, Math.max(0, endIdx - 1)))
       : -1;
@@ -962,7 +1165,18 @@ def _build_html(payload: dict[str, Any]) -> str:
       candle.setData(allCandles.slice(b.s, b.e));
       if ((data.markers || []).length > 0) {{
         const ts = getReplayTs();
-        candle.setMarkers((data.markers || []).filter((m) => Number(m.time) <= Number(ts)));
+        const fromTs = (b.s >= 0 && b.s < allCandles.length) ? Number(allCandles[b.s].time) : Number.NaN;
+        const toTs = (b.e > 0 && (b.e - 1) < allCandles.length) ? Number(allCandles[b.e - 1].time) : Number.NaN;
+        candle.setMarkers(
+          (data.markers || []).filter((m) => {{
+            const mt = Number(m.time);
+            if (!Number.isFinite(mt) || !Number.isFinite(Number(ts))) return false;
+            if (mt > Number(ts)) return false;
+            if (Number.isFinite(fromTs) && mt < fromTs) return false;
+            if (Number.isFinite(toTs) && mt > toTs) return false;
+            return true;
+          }})
+        );
       }}
     }}
 
@@ -974,70 +1188,6 @@ def _build_html(payload: dict[str, Any]) -> str:
       return LightweightCharts.LineStyle.Solid;
     }}
 
-    function addLineSegments(segments, sink) {{
-      for (const seg of segments || []) {{
-        const start = Number(seg.start);
-        let end = Number(seg.end);
-        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-        if (end <= start) {{
-          end = start + Math.max(1, Number(data.bar_seconds || 300));
-        }}
-        const s = chart.addLineSeries({{
-          color: seg.color || "#6b7280",
-          lineWidth: seg.width || 1,
-          lineStyle: lineStyle(seg.style),
-          autoscaleInfoProvider: () => null,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-        }});
-        s.setData([
-          {{ time: start, value: seg.level }},
-          {{ time: end, value: seg.level }},
-        ]);
-        if (Array.isArray(sink)) sink.push(s);
-      }}
-    }}
-
-    function addTradeBoxes(boxes, sink) {{
-      for (const b of boxes || []) {{
-        const start = Number(b.start);
-        let end = Number(b.end);
-        const base = Number(b.base);
-        const value = Number(b.value);
-        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-        if (end <= start) {{
-          end = start + Math.max(1, Number(data.bar_seconds || 300));
-        }}
-        if (!Number.isFinite(base) || !Number.isFinite(value)) continue;
-
-        const fillColor = b.fillColor || "rgba(100,116,139,0.12)";
-        const lineColor = b.lineColor || "rgba(100,116,139,0.8)";
-        const s = chart.addBaselineSeries({{
-          baseValue: {{ type: "price", price: base }},
-          topLineColor: lineColor,
-          topFillColor1: fillColor,
-          topFillColor2: fillColor,
-          bottomLineColor: lineColor,
-          bottomFillColor1: fillColor,
-          bottomFillColor2: fillColor,
-          autoscaleInfoProvider: () => null,
-          lineWidth: 1,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-        }});
-        s.setData([
-          {{ time: start, value: value }},
-          {{ time: end, value: value }},
-        ]);
-        if (Array.isArray(sink)) sink.push(s);
-      }}
-    }}
-
-    const staticSeries = [];
-    addTradeBoxes(data.trade_boxes || [], staticSeries);
-    addLineSegments(data.bracket_lines || [], staticSeries);
     chart.timeScale().fitContent();
 
     function fmtPrice(v) {{
@@ -1063,7 +1213,18 @@ def _build_html(payload: dict[str, Any]) -> str:
 
     function refreshReplayLabel() {{
       const ts = getReplayTs();
-      replayTimeEl.textContent = ts === null ? "" : `Replay time: ${{fmtTime(ts)}}`;
+      const base = ts === null ? "" : `Replay time: ${{fmtTime(ts)}}`;
+      if (replayClickArmed) {{
+        replayTimeEl.innerHTML = `${{base}} <span class="replay-hint">| click chart to jump replay</span>`;
+      }} else {{
+        replayTimeEl.textContent = base;
+      }}
+    }}
+
+    function setReplayClickArmed(nextArmed) {{
+      replayClickArmed = Boolean(nextArmed);
+      replayJumpToClickEl.classList.toggle("active", replayClickArmed);
+      refreshReplayLabel();
     }}
 
     function setReplayVisibleRange(tsUnix) {{
@@ -1265,8 +1426,16 @@ def _build_html(payload: dict[str, Any]) -> str:
         if (a._prio !== b._prio) return a._prio - b._prio;
         return Number(b.end || 0) - Number(a.end || 0);
       }});
+    const allBracketSorted = (data.bracket_lines || [])
+      .map((seg, idx) => ({{ ...seg, _idx: idx }}))
+      .sort((a, b) => Number(b.end || 0) - Number(a.end || 0));
+    const allTradeBoxesSorted = (data.trade_boxes || [])
+      .map((seg, idx) => ({{ ...seg, _idx: idx }}))
+      .sort((a, b) => Number(b.end || 0) - Number(a.end || 0));
 
     const liqSeries = new Map();
+    const bracketSeries = new Map();
+    const tradeBoxSeries = new Map();
 
     function getVisibleRangeUnix() {{
       const vr = chart.timeScale().getVisibleRange();
@@ -1348,6 +1517,121 @@ def _build_html(payload: dict[str, Any]) -> str:
       }}
     }}
 
+    function upsertBracketSeries(item) {{
+      const seg = item.seg;
+      const id = String(seg.id ?? seg._idx);
+      let rec = bracketSeries.get(id);
+      if (!rec) {{
+        const s = chart.addLineSeries({{
+          color: seg.color || "#6b7280",
+          lineWidth: seg.width || 1,
+          lineStyle: lineStyle(seg.style),
+          autoscaleInfoProvider: () => null,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        }});
+        rec = {{ series: s, s: Number.NaN, e: Number.NaN, lvl: Number.NaN }};
+        bracketSeries.set(id, rec);
+      }}
+      const lvl = Number(seg.level);
+      if (rec.s !== item.s || rec.e !== item.e || rec.lvl !== lvl) {{
+        rec.series.setData([
+          {{ time: item.s, value: lvl }},
+          {{ time: item.e, value: lvl }},
+        ]);
+        rec.s = item.s;
+        rec.e = item.e;
+        rec.lvl = lvl;
+      }}
+    }}
+
+    function upsertTradeBoxSeries(item) {{
+      const seg = item.seg;
+      const id = String(seg.id ?? seg._idx);
+      let rec = tradeBoxSeries.get(id);
+      const base = Number(seg.base);
+      const value = Number(seg.value);
+      if (!Number.isFinite(base) || !Number.isFinite(value)) return;
+      if (!rec) {{
+        const fillColor = seg.fillColor || "rgba(100,116,139,0.12)";
+        const lineColor = seg.lineColor || "rgba(100,116,139,0.8)";
+        const s = chart.addBaselineSeries({{
+          baseValue: {{ type: "price", price: base }},
+          topLineColor: lineColor,
+          topFillColor1: fillColor,
+          topFillColor2: fillColor,
+          bottomLineColor: lineColor,
+          bottomFillColor1: fillColor,
+          bottomFillColor2: fillColor,
+          autoscaleInfoProvider: () => null,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        }});
+        rec = {{ series: s, s: Number.NaN, e: Number.NaN, base: Number.NaN, value: Number.NaN }};
+        tradeBoxSeries.set(id, rec);
+      }}
+      if (rec.s !== item.s || rec.e !== item.e || rec.base !== base || rec.value !== value) {{
+        rec.series.applyOptions({{ baseValue: {{ type: "price", price: base }} }});
+        rec.series.setData([
+          {{ time: item.s, value: value }},
+          {{ time: item.e, value: value }},
+        ]);
+        rec.s = item.s;
+        rec.e = item.e;
+        rec.base = base;
+        rec.value = value;
+      }}
+    }}
+
+    function renderTradeArtifactsNow(source, sink, upsertFn) {{
+      const replayTs = getReplayTs();
+      const vr = getVisibleRangeUnix();
+      const margin = Math.max(60, Number(data.bar_seconds || 300) * 60);
+      const from = vr.from - margin;
+      const to = vr.to + margin;
+
+      const chosen = [];
+      for (const seg of source) {{
+        let s = Number(seg.start);
+        let e = Number(seg.end);
+        if (!Number.isFinite(s) || !Number.isFinite(e)) continue;
+        if (replayTs !== null) {{
+          if (s > replayTs) continue;
+          e = Math.min(e, replayTs);
+        }}
+        if (e <= s) {{
+          e = s + Math.max(1, Number(data.bar_seconds || 300));
+        }}
+        if (e < from || s > to) continue;
+        chosen.push({{ seg, s, e }});
+        if (chosen.length >= maxVisibleTradeArtifacts) break;
+      }}
+
+      const keep = new Set();
+      for (const item of chosen) {{
+        const id = String(item.seg.id ?? item.seg._idx);
+        keep.add(id);
+        upsertFn(item);
+      }}
+
+      for (const [id, rec] of sink.entries()) {{
+        if (keep.has(id)) continue;
+        try {{ chart.removeSeries(rec.series); }} catch (_) {{}}
+        sink.delete(id);
+      }}
+    }}
+
+    function renderBracketLinesNow() {{
+      renderTradeArtifactsNow(allBracketSorted, bracketSeries, upsertBracketSeries);
+    }}
+
+    function renderTradeBoxesNow() {{
+      renderTradeArtifactsNow(allTradeBoxesSorted, tradeBoxSeries, upsertTradeBoxSeries);
+    }}
+
     let liqRenderTimer = null;
     function scheduleRenderLiquidityLines() {{
       if (liqRenderTimer !== null) {{
@@ -1359,14 +1643,28 @@ def _build_html(payload: dict[str, Any]) -> str:
       }}, 90);
     }}
 
+    let tradeOverlayRenderTimer = null;
+    function scheduleRenderTradeArtifacts() {{
+      if (tradeOverlayRenderTimer !== null) {{
+        clearTimeout(tradeOverlayRenderTimer);
+      }}
+      tradeOverlayRenderTimer = setTimeout(() => {{
+        tradeOverlayRenderTimer = null;
+        renderTradeBoxesNow();
+        renderBracketLinesNow();
+      }}, 60);
+    }}
+
     replayRefreshLinesEl.addEventListener("click", () => {{
       scheduleRenderLiquidityLines();
+      scheduleRenderTradeArtifacts();
     }});
     replayPerfModeEl.addEventListener("change", () => {{
       performanceMode = Boolean(replayPerfModeEl.checked);
       if (!performanceMode) {{
         scheduleRenderLiquidityLines();
       }}
+      scheduleRenderTradeArtifacts();
     }});
 
     chart.subscribeCrosshairMove((param) => {{
@@ -1383,6 +1681,12 @@ def _build_html(payload: dict[str, Any]) -> str:
         `t=${{fmtTime(Number(param.time))}}  O=${{fmtPrice(Number(bar.open))}}` +
         `  H=${{fmtPrice(Number(bar.high))}}  L=${{fmtPrice(Number(bar.low))}}` +
         `  C=${{fmtPrice(Number(bar.close))}}`;
+    }});
+    chart.subscribeClick((param) => {{
+      if (!replayClickArmed) return;
+      if (!param || param.time === undefined) return;
+      setReplayClickArmed(false);
+      focusAt(Number(param.time));
     }});
 
     function findCandleIndex(tsUnix) {{
@@ -1437,6 +1741,7 @@ def _build_html(payload: dict[str, Any]) -> str:
         }}
       }}
       scheduleRenderLiquidityLines();
+      scheduleRenderTradeArtifacts();
     }}
 
     let loadingWindow = false;
@@ -1466,6 +1771,7 @@ def _build_html(payload: dict[str, Any]) -> str:
       if (!pinCameraOnStep) {{
         scheduleRenderLiquidityLines();
       }}
+      scheduleRenderTradeArtifacts();
     }});
 
     function stepReplayForwardOneBar() {{
@@ -1489,9 +1795,17 @@ def _build_html(payload: dict[str, Any]) -> str:
       if (!performanceMode) {{
         scheduleRenderLiquidityLines();
       }}
+      scheduleRenderTradeArtifacts();
     }}
     replayStepForwardEl.addEventListener("click", stepReplayForwardOneBar);
+    replayJumpToClickEl.addEventListener("click", () => {{
+      setReplayClickArmed(!replayClickArmed);
+    }});
     document.addEventListener("keydown", (ev) => {{
+      if (ev.key === "Escape" && replayClickArmed) {{
+        setReplayClickArmed(false);
+        return;
+      }}
       if (!(ev.shiftKey && ev.key === "ArrowRight")) return;
       const target = ev.target;
       const tag = (target && target.tagName ? String(target.tagName).toLowerCase() : "");
@@ -1510,6 +1824,7 @@ def _build_html(payload: dict[str, Any]) -> str:
     // Initial load should use replay zoom.
     hardCenterOnReplayBar(initialTs, {{ zoomHorizontal: true, stretchVertical: true }});
     scheduleRenderLiquidityLines();
+    scheduleRenderTradeArtifacts();
 
     function buildTradesTable() {{
       const wrap = document.getElementById("trades-wrap");
@@ -1663,11 +1978,15 @@ def main() -> None:
 
     df_feat = mod.compute_features(df, strategy_params)
     debug: dict[str, Any] = {}
+    saved_iter_trades = _load_iteration_trades(run_dir, iter_id=int(args.iter))
+
     bt_out = mod.run_backtest(df_feat, strategy_params=strategy_params, cfg=cfg, debug=debug)
     line_events = debug.get("line_events", [])
-    bt_trades = pd.DataFrame()
+    bt_trades = saved_iter_trades.copy()
     if isinstance(bt_out, tuple) and len(bt_out) >= 2 and isinstance(bt_out[1], pd.DataFrame):
-        bt_trades = bt_out[1].copy()
+        native_trades = bt_out[1].copy()
+        if bt_trades.empty:
+            bt_trades = native_trades
 
     chart_df = _slice_chart_window(
         df_feat,
@@ -1685,6 +2004,7 @@ def main() -> None:
     payload = _build_payload(
         chart_df=chart_df,
         bt_trades=bt_trades,
+        iter_row=iter_row,
         line_segments=line_segments,
         title=title,
         include_black_lines=bool(args.include_black_lines),

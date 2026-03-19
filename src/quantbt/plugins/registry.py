@@ -72,6 +72,7 @@ def load_default_plugins() -> None:
         "quantbt.plugins.entries.interequity_liqsweepb_entry",
         # Exits
         "quantbt.plugins.exits.atr_brackets",
+        "quantbt.plugins.exits.fixed_pips_brackets",
         "quantbt.plugins.exits.time_exit",
         "quantbt.plugins.exits.random_time_exit",
         "quantbt.plugins.exits.interequity_liqsweep_exit",

@@ -82,7 +82,20 @@ def limited_test(
     return pd.DataFrame(rows)
 
 
-def limited_test_pass_rate(results: pd.DataFrame) -> float:
+def limited_test_pass_rate(results: pd.DataFrame, *, min_trades: int | None = None) -> float:
     if results.empty:
         return 0.0
-    return float(results["favourable"].mean() * 100.0)
+    fav = results["favourable"]
+    if fav.dtype != bool:
+        fav = fav.astype(str).str.strip().str.lower().isin({"1", "true", "yes"})
+
+    if min_trades is None or "trades" not in results.columns:
+        return float(fav.mean() * 100.0)
+
+    trades = pd.to_numeric(results["trades"], errors="coerce")
+    valid = (trades >= int(min_trades)).fillna(False)
+    valid_count = int(valid.sum())
+    if valid_count <= 0:
+        return 0.0
+    favourable_valid = int((fav & valid).sum())
+    return float((favourable_valid / valid_count) * 100.0)

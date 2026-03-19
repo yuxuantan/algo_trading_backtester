@@ -35,10 +35,12 @@ from quantbt.artifacts import (
     walkforward_param_schedule_path,
 )
 from quantbt.results import (
+    enrich_limited_results,
     load_limited_summary,
     load_montecarlo_summary,
     load_walkforward_summary,
 )
+from quantbt.experiments.limited.criteria import parse_favourable_criteria
 from quantbt.io.datasets import read_dataset_meta
 
 import numpy as np
@@ -104,6 +106,7 @@ DEFAULT_ENTRY_PARAMS: dict[str, dict[str, Any]] = {
 
 DEFAULT_EXIT_PARAMS: dict[str, dict[str, Any]] = {
     "atr_brackets": {"rr": [1.5, 2.0, 2.5], "sldist_atr_mult": [1.0, 1.5], "atr_period": 14},
+    "fixed_pips_brackets": {"rr": [1.5, 2.0, 2.5], "stop_pips": [20.0, 30.0], "pip_size": 0.0001},
     "time_exit": {"hold_bars": [1]},
     "monkey_exit": {"avg_hold_bars": 15.0, "seed": 7},
     "random_time_exit": {"avg_hold_bars": 15.0, "seed": 7},
@@ -123,16 +126,16 @@ LIMITED_WORKBOOK_GLOBAL_INPUTS: list[str] = [
 LIMITED_WORKBOOK_SCENARIOS: list[dict[str, Any]] = [
     {
         "name": "ENTRY TEST: fixed stop and target exit",
-        "test_type": "Fixed ATR Exit",
-        "preset": "Fixed ATR Exit",
+        "test_type": "Fixed Pip Exit",
+        "preset": "Fixed Pip Exit",
         "entry_params_label": "Baseline entry parameter set",
         "exit_params_label": "Fixed stop / target exit parameters",
         "seed_mode": "none",
         "show_monkey_helper": False,
         "inputs": [
             "Baseline entry parameter set",
-            "Exit SL rule",
-            "Exit TP rule (e.g. fixed RR)",
+            "Fixed stop distance (pips)",
+            "Exit TP rule (fixed RR)",
         ],
         "outputs": [
             "% of iterations profitable",
@@ -1875,6 +1878,69 @@ def _limited_baseline_metrics_from_row(row: pd.Series, *, initial_equity: float)
     }
 
 
+def _format_limited_metric_name(metric: str) -> str:
+    raw = str(metric or "").strip()
+    if not raw:
+        return "metric"
+    special = {
+        "avg_profit_per_trade": "avg profit per trade",
+        "total_return_%": "total return %",
+        "max_drawdown_abs_%": "max drawdown abs %",
+        "max_drawdown_%": "max drawdown %",
+        "profit_factor": "profit factor",
+        "avg_R": "avg R",
+        "win_rate_%": "win rate %",
+    }
+    if raw in special:
+        return special[raw]
+    return raw.replace("_", " ")
+
+
+def _format_limited_value(value: Any) -> str:
+    try:
+        num = float(value)
+    except Exception:
+        return str(value)
+    if not np.isfinite(num):
+        return str(value)
+    return f"{num:.2f}"
+
+
+def _format_limited_criteria_text(criteria: Any) -> str:
+    try:
+        parsed = parse_favourable_criteria(criteria)
+    except Exception:
+        return json.dumps(criteria or {}, separators=(",", ":"))
+
+    rules = parsed.get("rules", [])
+    if not rules:
+        return "no favourable criteria"
+
+    joiner = " and " if parsed.get("mode", "all") == "all" else " or "
+    rendered_rules = []
+    for rule in rules:
+        metric = _format_limited_metric_name(rule.get("metric"))
+        op = str(rule.get("op", ""))
+        value = _format_limited_value(rule.get("value"))
+        rendered_rules.append(f"{metric} {op} {value}")
+    return joiner.join(rendered_rules)
+
+
+def _limited_criteria_metric_columns(criteria: Any, available_columns: pd.Index) -> list[str]:
+    try:
+        parsed = parse_favourable_criteria(criteria)
+    except Exception:
+        return []
+    cols: list[str] = []
+    seen: set[str] = set()
+    for rule in parsed.get("rules", []):
+        metric = str(rule.get("metric", "")).strip()
+        if metric and metric in available_columns and metric not in seen:
+            cols.append(metric)
+            seen.add(metric)
+    return cols
+
+
 def _build_monkey_dominance_criteria(*, baseline_return_pct: float, baseline_max_dd_pct: float) -> dict[str, Any]:
     return {
         "mode": "all",
@@ -1970,39 +2036,6 @@ def _is_monkey_limited_run(run_meta: dict[str, Any]) -> bool:
     exit_plugin = str(exit_cfg.get("name", "")).strip()
     monkey_plugins = {"monkey_entry", "monkey_exit", "random", "random_time_exit"}
     return bool(entry_plugins.intersection(monkey_plugins) or exit_plugin in monkey_plugins)
-
-
-def _classify_limited_core_decision(
-    *,
-    profitable_runs: int,
-    median_profit: float,
-    median_trades: float,
-    best_over_median: float,
-) -> str:
-    pass_ok = (
-        profitable_runs >= 70
-        and median_profit > 0
-        and median_trades >= 75
-        and best_over_median <= 3.0
-    )
-    retry_ok = (
-        (50 <= profitable_runs <= 69)
-        or (30 <= median_trades <= 74)
-        or (median_profit > 0 and 3.0 < best_over_median <= 5.0)
-    )
-    fail_ok = (
-        profitable_runs < 50
-        or median_profit <= 0
-        or median_trades < 30
-        or best_over_median > 5.0
-    )
-    if pass_ok:
-        return "PASS"
-    if fail_ok:
-        return "FAIL"
-    if retry_ok:
-        return "RETRY"
-    return "FAIL"
 
 
 def _classify_monkey_dominance_decision(dominance_pct: float) -> str:
@@ -2476,17 +2509,18 @@ def _render_limited_atr_robustness(results: pd.DataFrame) -> None:
         return
 
     work = results.copy()
-    work["_sldist_atr_mult"] = work["exit_params"].apply(
-        lambda x: _extract_numeric_param(x, ["sldist_atr_mult", "sldist_atr"])
+    work["_stop_distance"] = work["exit_params"].apply(
+        lambda x: _extract_numeric_param(x, ["stop_pips", "sldist_atr_mult", "sldist_atr"])
     )
     work["_rr"] = work["exit_params"].apply(lambda x: _extract_numeric_param(x, ["rr"]))
 
-    work = work.loc[pd.to_numeric(work["_sldist_atr_mult"], errors="coerce").notna()].copy()
+    work = work.loc[pd.to_numeric(work["_stop_distance"], errors="coerce").notna()].copy()
     if work.empty:
         return
 
+    stop_label = "stop_pips" if work["exit_params"].astype(str).str.contains("stop_pips").any() else "sldist_atr_mult"
     rr_unique = sorted(set(pd.to_numeric(work["_rr"], errors="coerce").dropna().astype(float).tolist()))
-    group_cols = ["_sldist_atr_mult"] if len(rr_unique) <= 1 else ["_rr", "_sldist_atr_mult"]
+    group_cols = ["_stop_distance"] if len(rr_unique) <= 1 else ["_rr", "_stop_distance"]
 
     rows: list[dict[str, Any]] = []
     grouped = work.groupby(group_cols, dropna=False)
@@ -2496,10 +2530,10 @@ def _render_limited_atr_robustness(results: pd.DataFrame) -> None:
 
         out: dict[str, Any] = {}
         if len(group_cols) == 1:
-            out["sldist_atr_mult"] = float(key[0])
+            out[stop_label] = float(key[0])
         else:
             out["rr"] = float(key[0])
-            out["sldist_atr_mult"] = float(key[1])
+            out[stop_label] = float(key[1])
 
         out["iters"] = int(len(g))
         if "favourable" in g.columns:
@@ -2538,23 +2572,22 @@ def _render_limited_atr_robustness(results: pd.DataFrame) -> None:
 
     best = rob.iloc[0]
     if len(group_cols) == 1:
-        best_label = f"sldist_atr_mult={float(best['sldist_atr_mult']):.3f}"
+        best_label = f"{stop_label}={float(best[stop_label]):.3f}"
     else:
-        best_label = f"rr={float(best['rr']):.3f}, sldist_atr_mult={float(best['sldist_atr_mult']):.3f}"
+        best_label = f"rr={float(best['rr']):.3f}, {stop_label}={float(best[stop_label]):.3f}"
 
-    st.subheader("ATR Exit Robustness")
+    st.subheader("Fixed Stop Exit Robustness")
     if len(group_cols) == 1:
         st.caption(
-            "Grouped by `sldist_atr_mult` to identify a stable fixed stop-distance multiplier "
-            "for entry-quality testing."
+            f"Grouped by `{stop_label}` to identify a stable fixed stop setting for entry-quality testing."
         )
     else:
         st.caption(
-            "RR varies in this run, so robustness is grouped by `(rr, sldist_atr_mult)` pairs."
+            f"RR varies in this run, so robustness is grouped by `(rr, {stop_label})` pairs."
         )
     st.info(f"Suggested robust setting: `{best_label}` (lowest composite robustness rank).")
 
-    display_cols = [c for c in ["rr", "sldist_atr_mult", "iters", "favourable_%", "median_return_%", "median_max_dd_%", "median_mar", "median_sortino", "return_iqr_%", "negative_return_%", "robust_rank"] if c in rob.columns]
+    display_cols = [c for c in ["rr", stop_label, "iters", "favourable_%", "median_return_%", "median_max_dd_%", "median_mar", "median_sortino", "return_iqr_%", "negative_return_%", "robust_rank"] if c in rob.columns]
     st.dataframe(rob[display_cols], use_container_width=True, hide_index=True)
 
 
@@ -3708,6 +3741,7 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
 
     spec = run_meta.get("spec", {}) if isinstance(run_meta, dict) else {}
     initial_equity = _infer_initial_equity_from_spec(spec)
+    results, pass_summary = enrich_limited_results(run_dir, results, run_meta, pass_summary)
     results = results.copy()
     results["_net_profit_abs"] = _limited_net_profit_series(results, initial_equity=initial_equity)
     total_iters = int(len(results))
@@ -3961,32 +3995,85 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
         median_profit = float(net_profit.median()) if not net_profit.dropna().empty else float("nan")
         median_trades = float(trades_s.median()) if not trades_s.dropna().empty else float("nan")
         best_profit = float(net_profit.max()) if not net_profit.dropna().empty else float("nan")
-        best_over_median = (
-            float(best_profit / median_profit)
-            if np.isfinite(best_profit) and np.isfinite(median_profit) and median_profit > 0
-            else float("inf")
+        favourable_pct = _as_float(pass_summary.get("favourable_pct"))
+        pass_threshold = _as_float(pass_summary.get("pass_threshold_%"))
+        decision = "PASS" if bool(pass_summary.get("passed", False)) else "FAIL"
+        min_trades = _as_float(pass_summary.get("min_trades"))
+        valid_iters = int(_as_float(pass_summary.get("valid_iters"))) if np.isfinite(_as_float(pass_summary.get("valid_iters"))) else 0
+        required_valid_iters = int(_as_float(pass_summary.get("required_valid_iters"))) if np.isfinite(_as_float(pass_summary.get("required_valid_iters"))) else 100
+        criteria_text = _format_limited_criteria_text(run_meta.get("criteria"))
+        favourable_gate_pass = bool(np.isfinite(favourable_pct) and np.isfinite(pass_threshold) and favourable_pct >= pass_threshold)
+        valid_gate_pass = bool(valid_iters >= required_valid_iters)
+        if np.isfinite(min_trades):
+            results["valid_iteration"] = (trades_s >= min_trades).fillna(False)
+        else:
+            results["valid_iteration"] = True
+        valid_mask = results["valid_iteration"].astype(bool)
+        favourable_mask = results.get("favourable", pd.Series(False, index=results.index))
+        if getattr(favourable_mask, "dtype", None) != bool:
+            favourable_mask = favourable_mask.astype(str).str.strip().str.lower().isin({"1", "true", "yes"})
+        favourable_valid_count = int((favourable_mask & valid_mask).sum())
+        unfavourable_valid_count = int((~favourable_mask & valid_mask).sum())
+        void_count = int((~valid_mask).sum())
+        results["iteration_status"] = np.where(
+            ~valid_mask,
+            "void",
+            np.where(favourable_mask, "favourable", "unfavourable"),
         )
-
-        decision = _classify_limited_core_decision(
-            profitable_runs=profitable_runs,
-            median_profit=median_profit,
-            median_trades=median_trades,
-            best_over_median=best_over_median,
-        )
-        _render_decision_badge("Limited Core Test (Grid + Robustness)", decision)
+        _render_decision_badge("Limited Test Decision", decision)
+        if decision == "PASS":
+            st.success(
+                f"PASS: favourable % of valid iterations is {favourable_pct:.2f}% "
+                f"against a {pass_threshold:.2f}% threshold, and valid iterations are "
+                f"{valid_iters}/{required_valid_iters}."
+            )
+        else:
+            fail_reasons: list[str] = []
+            if not favourable_gate_pass:
+                fail_reasons.append(
+                    f"favourable % of valid iterations is {favourable_pct:.2f}% but needs to be at least {pass_threshold:.2f}%"
+                )
+            if not valid_gate_pass:
+                fail_reasons.append(
+                    f"valid iterations are {valid_iters}, below the required {required_valid_iters}"
+                )
+            st.error("FAIL because " + " and ".join(fail_reasons) + ".")
         _render_metric_row(
             [
-                ("Runs Produced", total_iters, "{:d}"),
-                ("ProfitableRuns", profitable_runs, "{:d}"),
-                ("MedianProfit", median_profit, "{:.2f}"),
-                ("MedianTrades", median_trades, "{:.1f}"),
+                ("Favourable % (Valid)", favourable_pct, "{:.2f}"),
+                ("Favourable Valid", f"{favourable_valid_count}/{valid_iters}" if valid_iters > 0 else "0/0", "{}"),
+                ("Unfavourable Valid", unfavourable_valid_count, "{:d}"),
+                ("Void Iters", void_count, "{:d}"),
             ]
         )
         _render_metric_row(
             [
-                ("BestOverMedian", best_over_median, "{:.3f}"),
-                ("BestProfit", best_profit, "{:.2f}"),
-                ("Target Backtests", 100, "{:d}"),
+                ("Pass Threshold %", pass_threshold, "{:.2f}"),
+                ("Valid Iters", valid_iters, "{:d}"),
+                ("Req Valid Iters", required_valid_iters, "{:d}"),
+                ("MinTrades/Iter", min_trades, "{:.0f}"),
+            ]
+        )
+        _render_metric_row(
+            [
+                ("Favourable Gate", "PASS" if favourable_gate_pass else "FAIL", "{}"),
+                ("Valid-Count Gate", "PASS" if valid_gate_pass else "FAIL", "{}"),
+                ("Runs Produced (info)", total_iters, "{:d}"),
+                ("ProfitableRuns (info)", profitable_runs, "{:d}"),
+            ]
+        )
+        st.markdown("**Per-Iteration Rule**")
+        st.write(f"- Valid iteration: `trades >= {int(min_trades) if np.isfinite(min_trades) else 0}`")
+        st.write(f"- Favourable within valid iteration: `{criteria_text}`")
+        st.write(
+            f"- Formula: `Favourable % (Valid) = favourable valid / valid iterations = "
+            f"{favourable_valid_count} / {valid_iters if valid_iters > 0 else 0} = {favourable_pct:.2f}%`"
+        )
+        _render_metric_row(
+            [
+                ("MedianProfit (info)", median_profit, "{:.2f}"),
+                ("MedianTrades (info)", median_trades, "{:.1f}"),
+                ("BestProfit (info)", best_profit, "{:.2f}"),
                 ("NetProfit Basis", f"initial_equity={initial_equity:,.0f}", "{}"),
             ]
         )
@@ -3994,70 +4081,80 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
         core_df = pd.DataFrame(
             [
                 {
-                    "Metric": "ProfitableRuns",
-                    "Actual": f"{profitable_runs}",
-                    "Verdict": "PASS" if profitable_runs >= 70 else "RETRY" if profitable_runs >= 50 else "FAIL",
-                    "PASS": ">= 70",
-                    "RETRY": "50 to 69",
-                    "FAIL": "< 50",
-                },
-                {
-                    "Metric": "MedianProfit",
-                    "Actual": "n/a" if not np.isfinite(median_profit) else f"{median_profit:,.2f}",
-                    "Verdict": "PASS" if np.isfinite(median_profit) and median_profit > 0 else "FAIL",
-                    "PASS": "> 0",
-                    "RETRY": "must remain > 0",
-                    "FAIL": "<= 0",
-                },
-                {
-                    "Metric": "MedianTrades",
-                    "Actual": "n/a" if not np.isfinite(median_trades) else f"{median_trades:.1f}",
-                    "Verdict": "PASS" if median_trades >= 75 else "RETRY" if median_trades >= 30 else "FAIL",
-                    "PASS": ">= 75",
-                    "RETRY": "30 to 74",
-                    "FAIL": "< 30",
-                },
-                {
-                    "Metric": "BestOverMedian",
-                    "Actual": "inf" if not np.isfinite(best_over_median) else f"{best_over_median:.3f}",
-                    "Verdict": (
-                        "PASS"
-                        if np.isfinite(best_over_median) and best_over_median <= 3.0
-                        else "RETRY"
-                        if np.isfinite(best_over_median) and best_over_median <= 5.0
-                        else "FAIL"
+                    "Criterion": "Favourable % of valid iterations",
+                    "Actual": (
+                        "n/a"
+                        if not np.isfinite(favourable_pct)
+                        else f"{favourable_valid_count}/{valid_iters} = {favourable_pct:.2f}%"
                     ),
-                    "PASS": "<= 3.0",
-                    "RETRY": ">3.0 to <=5.0",
-                    "FAIL": "> 5.0",
+                    "Requirement": (
+                        f">= {pass_threshold:.2f}%"
+                        if np.isfinite(pass_threshold)
+                        else ">= threshold"
+                    ),
+                    "Verdict": "PASS" if favourable_gate_pass else "FAIL",
+                    "Used In Verdict": "Yes",
                 },
                 {
-                    "Metric": "Runs Produced",
+                    "Criterion": "Valid iteration count",
+                    "Actual": f"{valid_iters}",
+                    "Requirement": f">= {required_valid_iters}",
+                    "Verdict": "PASS" if valid_gate_pass else "FAIL",
+                    "Used In Verdict": "Yes",
+                },
+                {
+                    "Criterion": "Valid iteration rule",
+                    "Actual": f"trades >= {min_trades:.0f}" if np.isfinite(min_trades) else "n/a",
+                    "Requirement": "Per iteration",
+                    "Verdict": "INFO",
+                    "Used In Verdict": "Indirectly",
+                },
+                {
+                    "Criterion": "Favourable iteration rule",
+                    "Actual": criteria_text,
+                    "Requirement": "Criteria pass",
+                    "Verdict": "INFO",
+                    "Used In Verdict": "Indirectly",
+                },
+                {
+                    "Criterion": "Void iterations",
+                    "Actual": f"{void_count}",
+                    "Requirement": f"trades < {min_trades:.0f}" if np.isfinite(min_trades) else "not valid",
+                    "Verdict": "INFO",
+                    "Used In Verdict": "Indirectly",
+                },
+                {
+                    "Criterion": "Runs produced",
                     "Actual": f"{total_iters} backtests",
-                    "Verdict": "PASS" if total_iters >= 100 else "FAIL",
-                    "PASS": "100 backtests",
-                    "RETRY": "-",
-                    "FAIL": "far below target backtests",
+                    "Requirement": "Informational only",
+                    "Verdict": "INFO",
+                    "Used In Verdict": "No",
                 },
             ]
         )
         _render_verdict_dataframe(core_df)
+        st.caption(
+            "Only the two PASS/FAIL gates above determine the final verdict: "
+            "`Favourable % (Valid)` and `Valid Iters`. The per-iteration rule explains how an iteration becomes "
+            "valid, favourable, unfavourable, or void. Profitable-runs, median profit, median trades, and best profit are context only."
+        )
 
     st.subheader("Iterations")
-    iter_cols = [
-        c
-        for c in [
-            "iter",
-            "favourable",
-            "trades",
-            "_net_profit_abs",
-            "total_return_%",
-            "max_drawdown_abs_%",
-            "entry_params",
-            "exit_params",
-        ]
-        if c in results.columns
+    iter_cols_raw = [
+        "iter",
+        "iteration_status",
+        "trades",
+        *_limited_criteria_metric_columns(run_meta.get("criteria"), results.columns),
+        "_net_profit_abs",
+        "total_return_%",
+        "max_drawdown_abs_%",
+        "entry_params",
+        "exit_params",
     ]
+    iter_cols: list[str] = []
+    for c in iter_cols_raw:
+        if c in results.columns and c not in iter_cols:
+            iter_cols.append(c)
     iter_view = results[iter_cols] if iter_cols else results
     _render_win_loss_dataframe(iter_view, metric_col="_net_profit_abs", hide_index=True)
 
@@ -4087,7 +4184,6 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
                             ("Favourable", _status_label(bool(r.get("favourable", False))), "{}"),
                             ("Net Profit", float(r.get("_net_profit_abs", float("nan"))), "{:.2f}"),
                             ("Trades", trades_n, "{:d}"),
-                            ("BestOverMedian Ref", "see scorecard", "{}"),
                         ]
                     )
 
@@ -4447,9 +4543,11 @@ def _render_limited_workbook_summary(run_dir: Path, *, strategy_catalog: dict[st
     _render_decision_badge("Limited test decision", decision)
 
     st.markdown("**Pass / threshold inputs used**")
-    st.write(f"- Favourable criteria: `{json.dumps(criteria) if criteria else '{}'}'`")
+    st.write(f"- Favourable criteria: `{_format_limited_criteria_text(criteria)}`")
     st.write(f"- Pass threshold (%): {pass_threshold}")
-    st.write(f"- Min trades: {min_trades}")
+    st.write(f"- Min trades per iteration: {min_trades}")
+    if not is_monkey:
+        st.write(f"- Required valid iterations: {metrics.get('required_valid_iters', 100)}")
 
     if is_monkey:
         _render_metric_row(
@@ -4461,13 +4559,68 @@ def _render_limited_workbook_summary(run_dir: Path, *, strategy_catalog: dict[st
             ]
         )
     else:
+        pass_summary = summary.get("pass_summary", {}) if isinstance(summary.get("pass_summary"), dict) else {}
+        favourable_pct = _as_float(pass_summary.get("favourable_pct"))
+        valid_iters = metrics.get("valid_iters")
+        required_valid_iters = metrics.get("required_valid_iters")
+        profitable_runs = metrics.get("profitable_runs")
+        void_iters = (
+            int(metrics.get("total_iters", 0)) - int(valid_iters)
+            if isinstance(metrics.get("total_iters"), (int, float)) and isinstance(valid_iters, (int, float))
+            else None
+        )
+        favourable_valid_count = None
+        if isinstance(valid_iters, (int, float)) and np.isfinite(favourable_pct):
+            favourable_valid_count = int(round((float(favourable_pct) / 100.0) * int(valid_iters)))
+        unfavourable_valid_count = (
+            int(valid_iters) - int(favourable_valid_count)
+            if isinstance(valid_iters, (int, float)) and favourable_valid_count is not None
+            else None
+        )
+        favourable_gate_pass = bool(
+            np.isfinite(favourable_pct)
+            and np.isfinite(_as_float(pass_threshold))
+            and favourable_pct >= _as_float(pass_threshold)
+        )
+        valid_gate_pass = bool(
+            isinstance(valid_iters, (int, float))
+            and isinstance(required_valid_iters, (int, float))
+            and int(valid_iters) >= int(required_valid_iters)
+        )
         _render_metric_row(
             [
-                ("Runs produced", metrics.get("total_iters"), "{:d}"),
-                ("Profitable runs", metrics.get("profitable_runs"), "{:d}"),
-                ("Median profit", metrics.get("median_profit"), "{:.2f}"),
-                ("Median trades", metrics.get("median_trades"), "{:.1f}"),
+                ("Favourable % (valid)", favourable_pct, "{:.2f}"),
+                ("Favourable valid", favourable_valid_count if favourable_valid_count is not None else "n/a", "{}"),
+                ("Unfavourable valid", unfavourable_valid_count if unfavourable_valid_count is not None else "n/a", "{}"),
+                ("Void iters", void_iters if void_iters is not None else "n/a", "{}"),
             ]
+        )
+        _render_metric_row(
+            [
+                ("Pass threshold %", _as_float(pass_threshold), "{:.2f}"),
+                ("Valid iters", valid_iters, "{:d}"),
+                ("Req valid iters", required_valid_iters, "{:d}"),
+                ("Min trades/iter", summary.get("min_trades"), "{:d}"),
+            ]
+        )
+        _render_metric_row(
+            [
+                ("Favourable gate", "PASS" if favourable_gate_pass else "FAIL", "{}"),
+                ("Valid-count gate", "PASS" if valid_gate_pass else "FAIL", "{}"),
+                ("Runs produced (info)", metrics.get("total_iters"), "{:d}"),
+                ("Profitable runs (info)", profitable_runs, "{:d}"),
+            ]
+        )
+        _render_metric_row(
+            [
+                ("Median profit (info)", metrics.get("median_profit"), "{:.2f}"),
+                ("Median trades (info)", metrics.get("median_trades"), "{:.1f}"),
+            ]
+        )
+        st.caption(
+            "Final verdict uses only two run-level gates: `Favourable % (valid)` and `Valid iters`. "
+            "Each iteration becomes valid when it meets `min_trades`, favourable when it is valid and passes the criteria, "
+            "unfavourable when it is valid and fails, and void when it is not valid."
         )
 
     st.subheader("Detailed iteration table")
@@ -4477,10 +4630,23 @@ def _render_limited_workbook_summary(run_dir: Path, *, strategy_catalog: dict[st
         return
 
     results = pd.read_csv(results_path)
+    if isinstance(min_trades, (int, float)):
+        trades = pd.to_numeric(results.get("trades", pd.Series(index=results.index, dtype=float)), errors="coerce")
+        results["valid_iteration"] = (trades >= float(min_trades)).fillna(False)
+        favourable = results.get("favourable", pd.Series(False, index=results.index))
+        if getattr(favourable, "dtype", None) != bool:
+            favourable = favourable.astype(str).str.strip().str.lower().isin({"1", "true", "yes"})
+        results["iteration_status"] = np.where(
+            ~results["valid_iteration"].astype(bool),
+            "void",
+            np.where(favourable, "favourable", "unfavourable"),
+        )
     iter_cols = [
         c
         for c in [
             "iter",
+            "iteration_status",
+            "valid_iteration",
             "favourable",
             "trades",
             "_net_profit_abs",
@@ -5984,11 +6150,11 @@ def main() -> None:
                     "favourable_criteria": "",
                     "pass_threshold": "",
                 },
-                "Fixed ATR Exit": {
+                "Fixed Pip Exit": {
                     "entry_plugin": default_entry,
                     "entry_params": _strategy_seed_entry_params(),
-                    "exit_plugin": "atr_brackets",
-                    "exit_params": copy.deepcopy(DEFAULT_EXIT_PARAMS.get("atr_brackets", {"rr": [1.5, 2.0, 2.5], "sldist_atr_mult": [1.0, 1.5], "atr_period": 14})),
+                    "exit_plugin": "fixed_pips_brackets",
+                    "exit_params": copy.deepcopy(DEFAULT_EXIT_PARAMS.get("fixed_pips_brackets", {"rr": [1.5, 2.0, 2.5], "stop_pips": [20.0, 30.0], "pip_size": 0.0001})),
                     "seed_count": "",
                     "seed_start": "",
                     "exit_seed_count": "",
@@ -6309,7 +6475,7 @@ def main() -> None:
             show_exit_json_in_main = True
             monkey_entry_plugin_names = {"monkey_entry", "random"}
             monkey_exit_plugin_names = {"monkey_exit", "random_time_exit"}
-            rr_exit_plugin_names = {"atr_brackets", "interequity_liqsweep_exit", "interequity_liqsweepb_exit"}
+            rr_exit_plugin_names = {"atr_brackets", "fixed_pips_brackets", "interequity_liqsweep_exit", "interequity_liqsweepb_exit"}
             similar_entry_structured_keys: list[str] = []
             entry_uses_strategy_policy = bool(
                 current_entry_name
@@ -6569,6 +6735,7 @@ def main() -> None:
                 ):
                     show_exit_json_in_main = False
                     is_atr_brackets = str(current_exit_name or "") == "atr_brackets"
+                    is_fixed_pips_brackets = str(current_exit_name or "") == "fixed_pips_brackets"
                     if str(current_exit_name or "") == "atr_brackets" or "rr" in exit_params_dict:
                         rr_key = "rr"
                     elif "fallback_rr" in exit_params_dict:
@@ -6609,10 +6776,24 @@ def main() -> None:
                         if stop_dist_ok and stop_dist_value is not None:
                             exit_params_dict["sldist_atr_mult"] = stop_dist_value
                             exit_params_dict.pop("sldist_atr", None)
+                    elif is_fixed_pips_brackets:
+                        stop_pips_default = _value_to_csv_text(exit_params_dict.get("stop_pips", 20.0))
+                        _sync_widget_from_source("limited_structured_stop_pips", stop_pips_default)
+                        stop_pips_text = st.text_input(
+                            "Stop distance (pips)",
+                            key="limited_structured_stop_pips",
+                            help="Enter a single stop distance in pips or comma-separated values to sweep multiple settings.",
+                        )
+                        stop_pips_ok, stop_pips_value, stop_pips_detail = _parse_csv_numeric_text(stop_pips_text, kind="float")
+                        structured_input_checks.append((stop_pips_ok, "Stop distance (pips)", stop_pips_detail))
+                        if stop_pips_ok and stop_pips_value is not None:
+                            exit_params_dict["stop_pips"] = stop_pips_value
                     st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
                     exit_params = st.session_state.get("limited_exit_params_json", _json_pretty(exit_params_dict))
                     if is_atr_brackets:
                         st.caption("RR and stop-distance ATR multiplier are shown here. Other exit parameters are preserved; use Advanced to edit plugin-specific fields like ATR period.")
+                    elif is_fixed_pips_brackets:
+                        st.caption("RR and fixed stop distance in pips are shown here. Other exit parameters are preserved; use Advanced to edit plugin-specific fields like pip size.")
                     else:
                         st.caption("Other exit parameters are preserved. Use Advanced if you need to edit plugin-specific fields.")
                 elif str(current_exit_name or "") == "time_exit":
