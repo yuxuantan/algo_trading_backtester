@@ -816,25 +816,37 @@ def _build_entry_spec_from_exit_override(
             hold_bars = int(exit_spec["hold_bars"])
         except Exception:
             return None
-        if hold_bars <= 0:
+        if hold_bars < 0:
             return None
 
         sizing_params = dict(sizing_params or {})
-        fallback_stop_dist = 10.0 * float(cfg.pip_size)
-        if callable(size_fn):
+        structural_stop_dist = float(structural_gate["risk_dist"])
+        if not (math.isfinite(structural_stop_dist) and structural_stop_dist > 0):
+            return None
+        use_structural_stop_sizing = bool(exit_params.get("use_structural_stop_sizing"))
+        if use_structural_stop_sizing:
+            risk_amount = float(cfg.initial_equity) * float(strategy_params.risk_pct)
+            qty = risk_amount / structural_stop_dist
+            risk_dollars = float(risk_amount)
+        elif callable(size_fn):
             qty = size_fn(
                 cfg=cfg,
                 equity=float(equity),
                 side=str(side),
                 entry_open=float(entry_open),
-                exit_spec={"hold_bars": hold_bars},
+                exit_spec={
+                    "hold_bars": hold_bars,
+                    "sl": float(structural_gate["sl"]),
+                    "tp": float(structural_gate["tp"]),
+                    "stop_dist": float(structural_stop_dist),
+                },
                 entry=entry_ctx,
                 params=sizing_params,
             )
-            risk_dollars = float(qty) * fallback_stop_dist if qty is not None and math.isfinite(float(qty)) else float("nan")
+            risk_dollars = float(qty) * structural_stop_dist if qty is not None and math.isfinite(float(qty)) else float("nan")
         else:
             risk_amount = float(cfg.initial_equity) * float(strategy_params.risk_pct)
-            qty = risk_amount / fallback_stop_dist
+            qty = risk_amount / structural_stop_dist
             risk_dollars = float(risk_amount)
         if qty is None or not math.isfinite(float(qty)) or float(qty) <= 0:
             return None

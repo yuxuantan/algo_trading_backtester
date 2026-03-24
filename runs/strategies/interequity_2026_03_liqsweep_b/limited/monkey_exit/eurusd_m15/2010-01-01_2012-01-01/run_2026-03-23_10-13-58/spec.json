@@ -1,0 +1,219 @@
+{
+  "spec": {
+    "strategy": {
+      "name": "IE2026-03 LiqSweep B",
+      "entry": {
+        "mode": "all",
+        "rules": [
+          {
+            "name": "interequity_liqsweepb_entry",
+            "params": {
+              "min_rr": 1.0,
+              "max_rr": 10.0,
+              "atr_dist_for_liq_generation": 1.0,
+              "liq_move_away_atr": 3.0
+            }
+          }
+        ]
+      },
+      "exit": {
+        "name": "monkey_exit",
+        "params": {
+          "avg_hold_bars": 75.28571428571429,
+          "use_structural_stop_sizing": true,
+          "seed": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            48,
+            49,
+            50,
+            51,
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            73,
+            74,
+            75,
+            76,
+            77,
+            78,
+            79,
+            80
+          ]
+        }
+      },
+      "sizing": {
+        "name": "fixed_risk",
+        "params": {
+          "risk_pct": 0.01
+        }
+      },
+      "limited_test": {
+        "entry": {
+          "optimizable": {
+            "atr_dist_for_liq_generation": {
+              "label": "ATR distance for liquidity generation",
+              "start": 0.4,
+              "stop": 2.2,
+              "step": 0.2,
+              "integer": false
+            },
+            "liq_move_away_atr": {
+              "label": "Liquidity move-away ATR",
+              "start": 1.0,
+              "stop": 5.5,
+              "step": 0.5,
+              "integer": false
+            }
+          },
+          "non_optimizable": [
+            "min_rr",
+            "max_rr"
+          ]
+        },
+        "exit": {
+          "optimizable": {},
+          "non_optimizable": [
+            "fallback_rr",
+            "sl_buffer_pips",
+            "pip_size"
+          ]
+        }
+      }
+    },
+    "data": "data/processed/eurusd_m15_20100101_20120101_mt5_ftmo_python.csv",
+    "ts_col": "timestamp",
+    "test": {
+      "test_name": "monkey_exit_test__baseline_matched",
+      "favourable_criteria": "{\"mode\":\"all\",\"rules\":[{\"metric\":\"total_return_%\",\"op\":\"<\",\"value\":30.189922970257022},{\"metric\":\"max_drawdown_abs_%\",\"op\":\">\",\"value\":8.089885244386108}]}",
+      "pass_threshold_pct": 90.0,
+      "min_trades": 0,
+      "signal_cache_max": 0,
+      "save_trades": false,
+      "strategy_tag": "interequity_2026_03_liqsweep_b",
+      "strategy_module": "quantbt.strategies.interequity_2026_03_liqsweep_b",
+      "monkey_davey": {
+        "enabled": true
+      },
+      "test_focus": "entry_test",
+      "core_system_test": false
+    },
+    "config": {
+      "commission_per_round_trip": 5.0,
+      "spread_pips": 0.2,
+      "pip_size": 0.0001
+    }
+  },
+  "dataset_meta": {
+    "dataset_id": "EURUSD_M15_90bfccf47e1b",
+    "file_path": "data/processed/eurusd_m15_20100101_20120101_mt5_ftmo_python.csv",
+    "file_sha256": "90bfccf47e1bc97b620af6bd935e603c3e7602ce198a40dd8fa42afa2ab6118f",
+    "rows": 49437,
+    "start": "2010-01-04 00:00:00+00:00",
+    "end": "2011-12-30 23:00:00+00:00",
+    "timeframe": "M15",
+    "symbol": "EURUSD",
+    "source": "mt5_ftmo_python",
+    "created_at": "2026-03-16T17:57:51",
+    "extra": {
+      "provider": "mt5_terminal",
+      "backend": "silicon",
+      "requested_bars": null,
+      "requested_start": "2010-01-01T00:00:00+00:00",
+      "requested_end": "2012-01-01T00:00:00+00:00",
+      "timeframe": "M15",
+      "symbol": "EURUSD",
+      "server": "FTMO-Server3",
+      "login": 531094817,
+      "terminal": "MetaTrader 5",
+      "terminal_build": 5660
+    }
+  },
+  "criteria": {
+    "mode": "all",
+    "rules": [
+      {
+        "metric": "total_return_%",
+        "op": "<",
+        "value": 30.189922970257022
+      },
+      {
+        "metric": "max_drawdown_abs_%",
+        "op": ">",
+        "value": 8.089885244386108
+      }
+    ]
+  },
+  "pass_threshold_%": 90.0,
+  "min_trades": 0,
+  "monkey_davey": {
+    "enabled": true,
+    "baseline_return_%": 30.189922970257022,
+    "baseline_max_dd_%": 8.089885244386108,
+    "dd_metric": "max_drawdown_abs_%",
+    "pass_threshold_%": 90.0
+  }
+}

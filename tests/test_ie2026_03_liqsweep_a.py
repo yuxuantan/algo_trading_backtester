@@ -203,6 +203,49 @@ class Ie202603LiqSweepATests(unittest.TestCase):
 
         self.assertIsNone(entry_spec)
 
+    def test_time_exit_override_can_use_native_structural_sizing(self) -> None:
+        params = liq_sweep_a.Params(min_rr=1.0, max_rr=10.0, risk_pct=0.01)
+        cfg = liq_sweep_a.BacktestConfig(initial_equity=100_000.0)
+        high_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        low_pool = liq_sweep_a._LevelPool(max_size=10)  # pylint: disable=protected-access
+        high_pool.lvls = [1.10210]
+        high_pool.drawn_act = [True]
+        high_pool.state = [liq_sweep_a.ST_RED]
+        low_pool.lvls = [1.09900]
+        low_pool.drawn_act = [True]
+        low_pool.state = [liq_sweep_a.ST_PURPLE]
+
+        def fake_time_exit(*args, **kwargs):
+            del args, kwargs
+            return {"hold_bars": 0}
+
+        entry_spec = liq_sweep_a._build_entry_spec_from_exit_override(  # pylint: disable=protected-access
+            side="long",
+            entry_index=5,
+            entry_time=pd.Timestamp("2025-01-01T00:25:00Z"),
+            signal_price=1.1000,
+            entry_open=1.1005,
+            prev_low=1.0990,
+            prev_high=1.1010,
+            entry_atr=0.001,
+            high_pool=high_pool,
+            low_pool=low_pool,
+            strategy_params=params,
+            cfg=cfg,
+            equity=150_000.0,
+            exit_builder=fake_time_exit,
+            exit_params={"use_structural_stop_sizing": True},
+            exit_supports_entry=True,
+            size_fn=lambda **kwargs: self.fail("native structural sizing should bypass override size_fn"),
+            sizing_params={},
+            max_exit_index=10,
+        )
+
+        self.assertIsNotNone(entry_spec)
+        self.assertEqual(int(entry_spec["time_exit_i"]), 5)
+        self.assertAlmostEqual(float(entry_spec["qty"]), 645_161.2903225806, places=6)
+        self.assertAlmostEqual(float(entry_spec["risk_dollars"]), 1_000.0, places=8)
+
     def test_exit_override_entry_builder_uses_actual_entry_open_for_structural_rr_gate(self) -> None:
         params = liq_sweep_a.Params(min_rr=1.0, max_rr=10.0, risk_pct=0.01)
         cfg = liq_sweep_a.BacktestConfig(initial_equity=100_000.0)

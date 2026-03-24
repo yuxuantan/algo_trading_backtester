@@ -17,12 +17,8 @@ def _entry_rng(*, seed: int, entry: dict | None) -> random.Random:
 def _sample_hold_bars_from_avg(*, avg_hold_bars: float, rng: random.Random) -> int:
     if not math.isfinite(avg_hold_bars) or avg_hold_bars <= 0:
         raise ValueError("avg_hold_bars must be a positive finite number")
-    low = max(1, int(math.floor(avg_hold_bars)))
-    high = max(low, int(math.ceil(avg_hold_bars)))
-    if low == high:
-        return low
-    p_high = avg_hold_bars - low
-    return high if rng.random() < p_high else low
+    high = max(0, int(round(float(avg_hold_bars) * 2.0)))
+    return int(rng.randint(0, high))
 
 
 @register_exit("monkey_exit")
@@ -43,13 +39,13 @@ def build_exit(side: str, entry_open: float, prev_low: float, prev_high: float, 
     avg_hold_bars = params.get("avg_hold_bars")
     if avg_hold_bars is not None:
         hb = _sample_hold_bars_from_avg(avg_hold_bars=float(avg_hold_bars), rng=rng)
-        min_hb = int(params.get("min_hold_bars", 1))
+        min_hb = int(params.get("min_hold_bars", 0))
         max_hb_raw = params.get("max_hold_bars")
         if max_hb_raw is not None:
             hb = min(hb, int(max_hb_raw))
         hb = max(hb, min_hb)
-        if hb <= 0:
-            raise ValueError("effective hold_bars must be > 0")
+        if hb < 0:
+            raise ValueError("effective hold_bars must be >= 0")
         return {"hold_bars": int(hb)}
 
     hold_bars = params.get("hold_bars")
@@ -74,14 +70,14 @@ def _validate(params: dict) -> bool:
             avg = float(params["avg_hold_bars"])
             if not math.isfinite(avg) or avg <= 0:
                 return False
-            if "min_hold_bars" in params and int(params["min_hold_bars"]) <= 0:
+            if "min_hold_bars" in params and int(params["min_hold_bars"]) < 0:
                 return False
-            if "max_hold_bars" in params and int(params["max_hold_bars"]) <= 0:
+            if "max_hold_bars" in params and int(params["max_hold_bars"]) < 0:
                 return False
             return True
 
         if "hold_bars" in params and params.get("hold_bars") is not None:
-            if int(params["hold_bars"]) <= 0:
+            if int(params["hold_bars"]) < 0:
                 return False
             return True
 

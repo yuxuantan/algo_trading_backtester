@@ -91,7 +91,7 @@ def run_backtest_limited_time_exit_fast_summary(
             hold_bars = int(exit_spec["hold_bars"])
         except Exception:
             continue
-        if hold_bars <= 0:
+        if hold_bars < 0:
             continue
 
         risk_dollars = equity * float(cfg.risk_pct)

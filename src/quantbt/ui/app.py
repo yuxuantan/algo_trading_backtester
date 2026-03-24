@@ -41,6 +41,7 @@ from quantbt.results import (
     load_walkforward_summary,
 )
 from quantbt.experiments.limited.criteria import parse_favourable_criteria
+from quantbt.experiments.limited.monkey import load_baseline_hold_bars_values
 from quantbt.io.datasets import read_dataset_meta
 
 import numpy as np
@@ -1878,6 +1879,32 @@ def _limited_baseline_metrics_from_row(row: pd.Series, *, initial_equity: float)
     }
 
 
+def _limited_baseline_params_from_row(row: pd.Series, column_name: str) -> dict[str, Any] | None:
+    raw = row.get(column_name)
+    if isinstance(raw, dict):
+        return copy.deepcopy(raw)
+    if isinstance(raw, list):
+        if raw and isinstance(raw[0], dict):
+            return copy.deepcopy(raw[0])
+        return None
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parsed: Any = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        try:
+            parsed = ast.literal_eval(text)
+        except Exception:
+            return None
+    if isinstance(parsed, dict):
+        return copy.deepcopy(parsed)
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        return copy.deepcopy(parsed[0])
+    return None
+
+
 def _format_limited_metric_name(metric: str) -> str:
     raw = str(metric or "").strip()
     if not raw:
@@ -2412,6 +2439,10 @@ def _extract_numeric_param(raw: Any, keys: list[str]) -> float:
                 if pd.notna(v):
                     return float(v)
     return float("nan")
+
+
+def _derive_iteration_hold_param(raw: Any) -> float:
+    return _extract_numeric_param(raw, ["hold_bars", "avg_hold_bars"])
 
 
 def _compact_params_cell(raw: Any) -> str:
@@ -4144,10 +4175,12 @@ def _render_limited_results(run_dir: Path, *, strategy_catalog: dict[str, dict[s
         "iter",
         "iteration_status",
         "trades",
+        "avg_bars_held",
         *_limited_criteria_metric_columns(run_meta.get("criteria"), results.columns),
         "_net_profit_abs",
         "total_return_%",
         "max_drawdown_abs_%",
+        "max_drawdown_%",
         "entry_params",
         "exit_params",
     ]
@@ -6210,7 +6243,7 @@ def main() -> None:
                     "exit_seed_start": "1",
                     "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
                     "pass_threshold": "90",
-                    "extra_args": "--monkey-davey-style --monkey-fast-summary",
+                    "extra_args": "--monkey-davey-style",
                 },
                 "Monkey Entry + Exit": {
                     "entry_plugin": "monkey_entry",
@@ -6223,7 +6256,7 @@ def main() -> None:
                     "exit_seed_start": "",
                     "favourable_criteria": json.dumps(monkey_criteria, separators=(",", ":")),
                     "pass_threshold": "90",
-                    "extra_args": "--monkey-davey-style --monkey-fast-summary",
+                    "extra_args": "--monkey-davey-style",
                 },
             }
 
@@ -6384,7 +6417,8 @@ def main() -> None:
                 if selected_workbook_preset.startswith("Monkey"):
                     st.caption(
                         "Monkey scenarios should use the baseline-matched section below to bind targets "
-                        "(trade count/long ratio/avg hold) to a selected core baseline run."
+                        "(trade count/long ratio/avg hold) and simplified random-exit hold inputs "
+                        "to a selected core baseline run."
                     )
             else:
                 st.info(
@@ -6394,6 +6428,16 @@ def main() -> None:
 
             monkey_modes = {"Monkey Entry", "Monkey Exit", "Monkey Entry + Exit"}
             selected_monkey_mode = preset_label if preset_label in monkey_modes else None
+            monkey_lock_payload = st.session_state.get("limited_monkey_derived_fields")
+            monkey_exit_baseline_entry_bound = bool(
+                selected_monkey_mode == "Monkey Exit"
+                and isinstance(monkey_lock_payload, dict)
+                and str(monkey_lock_payload.get("mode", "")) == "Monkey Exit"
+            )
+            monkey_exit_baseline_entry_locked = bool(
+                monkey_exit_baseline_entry_bound
+                and not bool(st.session_state.get("limited_monkey_unlock_overrides", False))
+            )
 
             def _reapply_locked_monkey_fields(mode_label: str | None) -> None:
                 if not mode_label:
@@ -6410,6 +6454,8 @@ def main() -> None:
                     "limited_exit_plugin_select",
                     "limited_entry_params_json",
                     "limited_exit_params_json",
+                    "limited_sizing_plugin_select",
+                    "limited_sizing_params_json",
                     "limited_seed_count",
                     "limited_seed_start",
                     "limited_exit_seed_count",
@@ -6428,6 +6474,7 @@ def main() -> None:
 
             monkey_base_run_raw = ""
             monkey_baseline_loaded_ok: bool | None = None
+            selected_base_iter: int | None = None
 
             scenario_entry_label = (
                 str(selected_workbook.get("entry_params_label", "Entry params JSON"))
@@ -6475,7 +6522,7 @@ def main() -> None:
             show_exit_json_in_main = True
             monkey_entry_plugin_names = {"monkey_entry", "random"}
             monkey_exit_plugin_names = {"monkey_exit", "random_time_exit"}
-            rr_exit_plugin_names = {"atr_brackets", "fixed_pips_brackets", "interequity_liqsweep_exit", "interequity_liqsweepb_exit"}
+            rr_exit_plugin_names = {"atr_brackets", "fixed_pips_brackets", "interequity_liqsweep_exit", "interequity_liqsweepb_exit", "interequity_liqsweepc_exit"}
             similar_entry_structured_keys: list[str] = []
             entry_uses_strategy_policy = bool(
                 current_entry_name
@@ -6658,6 +6705,30 @@ def main() -> None:
                     st.caption(
                         f"Side mode: `{entry_side}`. Use Advanced to change side, spacing, seed, or other monkey-entry parameters."
                     )
+                elif monkey_exit_baseline_entry_bound:
+                    show_entry_json_in_main = False
+                    if monkey_exit_baseline_entry_locked:
+                        st.caption(
+                            "Baseline-matched Monkey Exit reuses the selected baseline iteration's exact entry params. "
+                            "Turn on `Unlock overrides` if you want to edit them."
+                        )
+                        entry_params = str(st.session_state.get("limited_entry_params_json", _json_pretty(entry_params_dict)) or "")
+                        st.code(entry_params, language="json")
+                    else:
+                        payload_entry_json = ""
+                        if isinstance(monkey_lock_payload, dict):
+                            payload_entry_json = str(monkey_lock_payload.get("limited_entry_params_json", "") or "")
+                        if payload_entry_json.strip() and not str(st.session_state.get("limited_entry_params_json", "") or "").strip():
+                            st.session_state["limited_entry_params_json"] = payload_entry_json
+                        st.caption(
+                            "Baseline-matched Monkey Exit is still using the selected baseline iteration's exact entry params. "
+                            "You can edit this JSON manually while overrides are unlocked."
+                        )
+                        entry_params = st.text_area(
+                            scenario_entry_label,
+                            height=150,
+                            key="limited_entry_params_json",
+                        )
                 elif entry_uses_strategy_policy:
                     show_entry_json_in_main = False
                     entry_params = _render_strategy_policy_inputs(
@@ -6814,26 +6885,53 @@ def main() -> None:
                     st.caption("Use comma-separated integers to test several fixed holding periods without editing JSON.")
                 elif str(current_exit_name or "") in monkey_exit_plugin_names:
                     show_exit_json_in_main = False
-                    avg_hold_default = float(
-                        exit_params_dict.get("avg_hold_bars", exit_params_dict.get("hold_bars", 10.0)) or 10.0
-                    )
-                    if not math.isfinite(avg_hold_default) or avg_hold_default <= 0:
-                        avg_hold_default = 10.0
-                    _sync_widget_from_source("limited_structured_avg_hold_bars", float(avg_hold_default))
-                    avg_hold_bars = float(
-                        st.number_input(
-                            "Average hold bars",
-                            min_value=1.0,
-                            step=0.25,
-                            key="limited_structured_avg_hold_bars",
+                    hold_values_raw = exit_params_dict.get("hold_bars_values")
+                    bootstrap_hold_values: list[int] = []
+                    if isinstance(hold_values_raw, list):
+                        for value in hold_values_raw:
+                            parsed = _as_float(value)
+                            if np.isfinite(parsed) and parsed >= 1 and float(parsed).is_integer():
+                                bootstrap_hold_values.append(int(parsed))
+                    if bootstrap_hold_values:
+                        bootstrap_count = len(bootstrap_hold_values)
+                        bootstrap_avg = float(sum(bootstrap_hold_values) / bootstrap_count)
+                        st.caption(
+                            "Bootstrap mode is active: monkey exit samples hold bars from the selected baseline trade pool. "
+                            "Use Advanced JSON to inspect/edit the sampled values or switch back to mean-hold sampling."
                         )
-                    )
-                    exit_params_dict["avg_hold_bars"] = float(avg_hold_bars)
-                    exit_params_dict.pop("hold_bars_values", None)
-                    exit_params_dict.pop("hold_bars", None)
-                    st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
-                    exit_params = st.session_state["limited_exit_params_json"]
-                    st.caption("This controls the mean hold time for monkey exit sampling. Seed settings remain in the Monkey Sampling section.")
+                        _render_metric_row(
+                            [
+                                ("Bootstrap Holds", bootstrap_count, "{:d}"),
+                                ("Avg Hold", bootstrap_avg, "{:.2f}"),
+                                ("Min Hold", min(bootstrap_hold_values), "{:d}"),
+                                ("Max Hold", max(bootstrap_hold_values), "{:d}"),
+                            ]
+                        )
+                        exit_params = st.session_state.get("limited_exit_params_json", _json_pretty(exit_params_dict))
+                    else:
+                        avg_hold_default = float(
+                            exit_params_dict.get("avg_hold_bars", exit_params_dict.get("hold_bars", 10.0)) or 10.0
+                        )
+                        if not math.isfinite(avg_hold_default) or avg_hold_default <= 0:
+                            avg_hold_default = 10.0
+                        _sync_widget_from_source("limited_structured_avg_hold_bars", float(avg_hold_default))
+                        avg_hold_bars = float(
+                            st.number_input(
+                                "Average hold bars",
+                                min_value=1.0,
+                                step=0.25,
+                                key="limited_structured_avg_hold_bars",
+                            )
+                        )
+                        exit_params_dict["avg_hold_bars"] = float(avg_hold_bars)
+                        exit_params_dict.pop("hold_bars_values", None)
+                        exit_params_dict.pop("hold_bars", None)
+                        st.session_state["limited_exit_params_json"] = _json_pretty(exit_params_dict)
+                        exit_params = st.session_state["limited_exit_params_json"]
+                        st.caption(
+                            "Monkey exit now samples hold bars uniformly from `0` to `2 x` this mean. "
+                            "Seed settings remain in the Monkey Sampling section."
+                        )
                 else:
                     exit_params = st.text_area(
                         scenario_exit_label,
@@ -7034,7 +7132,7 @@ def main() -> None:
                 st.markdown("#### Monkey Test (Baseline-Matched)")
                 st.caption(
                     "Select a baseline limited run and apply a baseline-matched monkey setup. "
-                    "This auto-fills target trades/long ratio/avg hold, dominance criteria, and seed defaults. "
+                    "This auto-fills target trades/long ratio/avg hold, simplified random-exit inputs, dominance criteria, and seed defaults. "
                     "You can still edit the fields above after applying."
                 )
                 unlock_cols = st.columns([1.25, 2.75])
@@ -7065,6 +7163,8 @@ def main() -> None:
 
                 selected_base_row: pd.Series | None = None
                 selected_base_metrics: dict[str, float] | None = None
+                selected_base_hold_values: list[int] | None = None
+                selected_base_entry_params: dict[str, Any] | None = None
                 if loaded_base is None and monkey_base_run_raw.strip():
                     st.error("Could not load selected baseline limited run.")
                 elif loaded_base is not None:
@@ -7079,7 +7179,6 @@ def main() -> None:
                             .sort_values()
                             .tolist()
                         )
-                    selected_base_iter: int | None = None
                     if len(base_iter_options) > 1:
                         selected_base_iter = st.selectbox(
                             "Baseline iteration",
@@ -7094,6 +7193,23 @@ def main() -> None:
                     if selected_base_row is not None:
                         base_initial_eq = _infer_initial_equity_from_spec(base_meta.get("spec", {}) if isinstance(base_meta, dict) else {})
                         selected_base_metrics = _limited_baseline_metrics_from_row(selected_base_row, initial_equity=base_initial_eq)
+                        selected_base_entry_params = _limited_baseline_params_from_row(selected_base_row, "entry_params")
+                        base_iter_for_holds = selected_base_iter
+                        if base_iter_for_holds is None:
+                            row_iter_value = _as_float(selected_base_row.get("iter"))
+                            if np.isfinite(row_iter_value):
+                                base_iter_for_holds = int(row_iter_value)
+                        try:
+                            selected_base_hold_values = load_baseline_hold_bars_values(
+                                _abs_path(monkey_base_run_raw.strip()),
+                                iter_id=base_iter_for_holds,
+                            )
+                        except Exception:
+                            selected_base_hold_values = None
+                        if selected_base_hold_values and not np.isfinite(selected_base_metrics.get("avg_bars_held", float("nan"))):
+                            selected_base_metrics["avg_bars_held"] = float(
+                                sum(selected_base_hold_values) / len(selected_base_hold_values)
+                            )
                         _render_metric_row(
                             [
                                 ("Base Trades", selected_base_metrics.get("trades", float("nan")), "{:.0f}"),
@@ -7107,9 +7223,29 @@ def main() -> None:
                                 ("Base MaxDD %", selected_base_metrics.get("max_drawdown_abs_%", float("nan")), "{:.2f}"),
                                 ("Monkey Seeds", 8000, "{:d}"),
                                 ("Davey PASS Floor %", 90, "{:d}"),
-                                ("Constraint Note", "filter in Results tab", "{}"),
+                                ("Mean Hold Benchmark", selected_base_metrics.get("avg_bars_held", float("nan")), "{:.2f}"),
                             ]
                         )
+                        if selected_base_entry_params:
+                            st.caption("Baseline entry params were loaded from the selected iteration and will be reused for Monkey Exit.")
+                        else:
+                            st.warning(
+                                "Selected baseline iteration is missing parseable `entry_params`. "
+                                "Monkey Exit cannot reuse the exact baseline entry setup until that data is available."
+                            )
+                        if selected_base_hold_values:
+                            st.caption(
+                                "Baseline mean hold was loaded from the selected iteration's realized `bars_held` values."
+                            )
+                        else:
+                            st.warning(
+                                "Selected baseline run is missing positive `bars_held` samples for the chosen iteration. "
+                                "Monkey exit mean-hold matching cannot be applied until that data is available."
+                            )
+                        if selected_monkey_mode in {"Monkey Exit", "Monkey Entry + Exit"}:
+                            st.caption(
+                                "Monkey exit will draw each hold length uniformly from `0` to `2 x` the selected baseline mean hold bars."
+                            )
 
                         def _apply_baseline_monkey_preset(mode_label: str) -> None:
                             assert selected_base_metrics is not None
@@ -7118,6 +7254,7 @@ def main() -> None:
                             base_avg_hold = selected_base_metrics.get("avg_bars_held", float("nan"))
                             base_ret = selected_base_metrics.get("total_return_%", float("nan"))
                             base_dd = selected_base_metrics.get("max_drawdown_abs_%", float("nan"))
+                            base_entry_params = copy.deepcopy(selected_base_entry_params or {})
                             if not (np.isfinite(base_trades) and base_trades > 0 and np.isfinite(base_ret) and np.isfinite(base_dd)):
                                 raise ValueError("Baseline run row is missing required metrics (trades, return, max drawdown).")
 
@@ -7143,12 +7280,26 @@ def main() -> None:
                                 pending_updates["limited_seed_start"] = "1"
                             if mode_label == "Monkey Exit":
                                 pending_updates["limited_entry_plugin_select"] = default_entry
+                                if not base_entry_params:
+                                    raise ValueError(
+                                        "Selected baseline iteration is missing parseable `entry_params` required for Monkey Exit."
+                                    )
+                                pending_updates["limited_entry_params_json"] = _json_pretty(base_entry_params)
                                 pending_updates["limited_seed_count"] = ""
                                 pending_updates["limited_seed_start"] = ""
 
                             if mode_label in {"Monkey Exit", "Monkey Entry + Exit"}:
+                                if not (np.isfinite(avg_hold) and float(avg_hold) > 0):
+                                    raise ValueError(
+                                        "Selected baseline run is missing positive `avg_bars_held` required for monkey exit hold randomization."
+                                    )
                                 pending_updates["limited_exit_plugin_select"] = "monkey_exit"
-                                pending_updates["limited_exit_params_json"] = _json_pretty({"avg_hold_bars": avg_hold})
+                                exit_params_payload: dict[str, Any] = {"avg_hold_bars": float(avg_hold)}
+                                if mode_label == "Monkey Exit":
+                                    exit_params_payload["use_structural_stop_sizing"] = True
+                                pending_updates["limited_exit_params_json"] = _json_pretty(exit_params_payload)
+                                pending_updates["limited_sizing_plugin_select"] = default_sizing
+                                pending_updates["limited_sizing_params_json"] = _json_pretty(_strategy_default_sizing_params())
                                 if mode_label == "Monkey Exit":
                                     pending_updates["limited_exit_seed_count"] = "8000"
                                     pending_updates["limited_exit_seed_start"] = "1"
@@ -7158,43 +7309,25 @@ def main() -> None:
                                     pending_updates["limited_exit_seed_start"] = ""
                             if mode_label == "Monkey Entry":
                                 pending_updates["limited_exit_plugin_select"] = default_exit
+                                pending_updates["limited_sizing_plugin_select"] = default_sizing
+                                pending_updates["limited_sizing_params_json"] = _json_pretty(_strategy_default_sizing_params())
                                 pending_updates["limited_exit_seed_count"] = ""
                                 pending_updates["limited_exit_seed_start"] = ""
 
                             pending_updates["limited_favourable_criteria"] = json.dumps(criteria, separators=(",", ":"))
                             pending_updates["limited_pass_threshold"] = "90"
-                            # Monkey tests should not fail due to a separate trade-count gate.
-                            # Trade-count matching is handled by the monkey prefilter (for supported modes).
+                            # Monkey tests compare dominance against the baseline, so we do not
+                            # add a separate minimum-trades gate on top of that workflow.
                             pending_updates["limited_min_trades"] = "0"
                             pending_updates["limited_test_name"] = (
                                 "monkey_entry_exit_test__baseline_matched"
                                 if mode_label == "Monkey Entry + Exit"
                                 else ("monkey_entry_test__baseline_matched" if mode_label == "Monkey Entry" else "monkey_exit_test__baseline_matched")
                             )
-                            monkey_prefilter_args_parts: list[str] = []
                             monkey_runtime_args_parts: list[str] = ["--monkey-davey-style"]
-                            if mode_label in {"Monkey Exit", "Monkey Entry + Exit"}:
-                                monkey_prefilter_args_parts.extend(
-                                    [
-                                        "--monkey-match-prefilter",
-                                        "--monkey-match-target-trades",
-                                        str(target_entries),
-                                        "--monkey-match-trade-tol-pct",
-                                        "5",
-                                    ]
-                                )
-                                if np.isfinite(base_long_pct):
-                                    monkey_prefilter_args_parts.extend(
-                                        ["--monkey-match-target-long-pct", f"{float(base_long_pct):.6g}", "--monkey-match-long-tol-pp", "5"]
-                                    )
-                                if np.isfinite(avg_hold) and float(avg_hold) > 0:
-                                    monkey_prefilter_args_parts.extend(
-                                        ["--monkey-match-target-avg-hold", f"{float(avg_hold):.6g}", "--monkey-match-hold-tol-pct", "5"]
-                                    )
-                                monkey_runtime_args_parts.append("--monkey-fast-summary")
                             pending_updates["limited_extra_args"] = " ".join(
                                 shlex.quote(str(x))
-                                for x in [*monkey_prefilter_args_parts, *monkey_runtime_args_parts]
+                                for x in monkey_runtime_args_parts
                             )
                             pending_updates["limited_monkey_unlock_overrides"] = False
 
@@ -7211,6 +7344,12 @@ def main() -> None:
                                 ),
                                 "limited_exit_params_json": str(
                                     pending_updates.get("limited_exit_params_json", st.session_state.get("limited_exit_params_json", ""))
+                                ),
+                                "limited_sizing_plugin_select": str(
+                                    pending_updates.get("limited_sizing_plugin_select", st.session_state.get("limited_sizing_plugin_select", ""))
+                                ),
+                                "limited_sizing_params_json": str(
+                                    pending_updates.get("limited_sizing_params_json", st.session_state.get("limited_sizing_params_json", ""))
                                 ),
                                 "limited_seed_count": str(pending_updates.get("limited_seed_count", st.session_state.get("limited_seed_count", ""))),
                                 "limited_seed_start": str(pending_updates.get("limited_seed_start", st.session_state.get("limited_seed_start", ""))),
@@ -7250,7 +7389,8 @@ def main() -> None:
                         if selected_monkey_mode == "Monkey Entry + Exit":
                             st.caption(
                                 "For `Monkey Entry + Exit`, the helper seeds entry only (8,000) to avoid entry-seed x exit-seed Cartesian blow-up. "
-                                "Use Results > Limited tests > Constrained Dominance to apply the ±5% filters against your baseline."
+                                "The exit side uses the selected baseline mean hold bars and randomizes uniformly from `0` to `2 x` that mean. "
+                                "No baseline-matching prefilter is applied."
                             )
 
             def _json_check(label: str, raw_text: str) -> tuple[bool, str, str]:
@@ -7325,6 +7465,7 @@ def main() -> None:
                     isinstance(lock_payload, dict)
                     and str(lock_payload.get("mode", "")) == str(selected_monkey_mode)
                     and str(lock_payload.get("baseline_run", "")).strip() == monkey_base_run_raw.strip()
+                    and lock_payload.get("baseline_iter") == selected_base_iter
                 )
                 lock_detail = (
                     "Derived fields locked to applied baseline."
@@ -7349,7 +7490,12 @@ def main() -> None:
 
             estimate_entry_raw = str(entry_params or "").strip()
             estimate_exit_raw = str(exit_params or "").strip()
-            if selected_entry_name and selected_entry_name == entry_default_name and strategy_entry_contract.get("has_policy", False):
+            if (
+                selected_entry_name
+                and selected_entry_name == entry_default_name
+                and strategy_entry_contract.get("has_policy", False)
+                and not monkey_exit_baseline_entry_bound
+            ):
                 estimate_entry_raw = json.dumps(
                     _sanitize_strategy_limited_params(
                         _json_object_or_empty(estimate_entry_raw),
@@ -7471,7 +7617,12 @@ def main() -> None:
                     if not commission_rt_raw:
                         raise ValueError("Commission RT is required.")
 
-                    if selected_entry_name and selected_entry_name == entry_default_name and strategy_entry_contract.get("has_policy", False):
+                    if (
+                        selected_entry_name
+                        and selected_entry_name == entry_default_name
+                        and strategy_entry_contract.get("has_policy", False)
+                        and not monkey_exit_baseline_entry_bound
+                    ):
                         entry_params_obj = _json_object_or_empty(entry_params_raw)
                         entry_params_raw = json.dumps(
                             _sanitize_strategy_limited_params(

@@ -1,0 +1,13 @@
+{
+  "run_id": "run_2026-03-23_22-49-42",
+  "workflow": "limited",
+  "strategy": "interequity_2026_03_liqsweep_b",
+  "category": "monkey_exit",
+  "dataset_tag": "eurusd_m15_20100101_20120101",
+  "dataset_slug": "eurusd_m15",
+  "date_window": "2010-01-01_2012-01-01",
+  "created_at": "2026-03-23T22:49:42",
+  "run_dir": "runs/strategies/interequity_2026_03_liqsweep_b/limited/monkey_exit/eurusd_m15/2010-01-01_2012-01-01/run_2026-03-23_22-49-42",
+  "scenario_label": "monkey_exit_test__baseline_matched",
+  "test_focus": "entry_test"
+}

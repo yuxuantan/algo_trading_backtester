@@ -70,6 +70,7 @@ def load_default_plugins() -> None:
         "quantbt.plugins.entries.donchian_breakout",
         "quantbt.plugins.entries.interequity_liqsweep_entry",
         "quantbt.plugins.entries.interequity_liqsweepb_entry",
+        "quantbt.plugins.entries.interequity_liqsweepc_entry",
         # Exits
         "quantbt.plugins.exits.atr_brackets",
         "quantbt.plugins.exits.fixed_pips_brackets",
@@ -77,6 +78,7 @@ def load_default_plugins() -> None:
         "quantbt.plugins.exits.random_time_exit",
         "quantbt.plugins.exits.interequity_liqsweep_exit",
         "quantbt.plugins.exits.interequity_liqsweepb_exit",
+        "quantbt.plugins.exits.interequity_liqsweepc_exit",
         # Sizing
         "quantbt.plugins.sizing.fixed_risk",
         "quantbt.plugins.sizing.fixed_units",

@@ -4,13 +4,18 @@ import sys
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from quantbt.experiments.limited.runner import _get_full_system_runner
+from quantbt.experiments.limited.runner import (
+    _build_schedule_metrics_from_trades,
+    _get_full_system_runner,
+)
 
 
 class LimitedRunnerFullSystemTests(unittest.TestCase):
@@ -50,6 +55,29 @@ class LimitedRunnerFullSystemTests(unittest.TestCase):
                 entry_combo=({"plugin": fake_plugin, "params": {}}, {"plugin": fake_plugin, "params": {}}),
             )
         )
+
+    def test_build_schedule_metrics_from_trades_uses_trade_times(self) -> None:
+        idx = pd.to_datetime(
+            [
+                "2020-01-01 00:00:00+00:00",
+                "2020-01-01 00:15:00+00:00",
+                "2020-01-01 00:30:00+00:00",
+                "2020-01-01 00:45:00+00:00",
+            ],
+            utc=True,
+        )
+        trades = pd.DataFrame(
+            [
+                {"entry_time": idx[0], "exit_time": idx[2], "side": "long"},
+                {"entry_time": idx[1], "exit_time": idx[3], "side": "short"},
+            ]
+        )
+
+        metrics = _build_schedule_metrics_from_trades(idx, trades)
+
+        self.assertEqual(metrics["trades"], 2.0)
+        self.assertEqual(metrics["long_trade_pct"], 50.0)
+        self.assertEqual(metrics["avg_bars_held"], 2.0)
 
 
 if __name__ == "__main__":

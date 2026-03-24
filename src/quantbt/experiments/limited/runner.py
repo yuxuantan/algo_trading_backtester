@@ -120,6 +120,44 @@ def _get_full_system_runner(
     return runner if callable(runner) else None
 
 
+def _build_schedule_metrics_from_trades(index: pd.Index, trades_df: pd.DataFrame | None) -> ScheduleMetrics:
+    if trades_df is None or trades_df.empty:
+        return {
+            "trades": 0.0,
+            "long_trade_pct": float("nan"),
+            "avg_bars_held": float("nan"),
+        }
+
+    idx_pos = {pd.Timestamp(ts): i for i, ts in enumerate(index)}
+    trade_count = int(len(trades_df))
+    side_series = trades_df["side"] if "side" in trades_df.columns else pd.Series(index=trades_df.index, dtype=object)
+    long_trade_pct = (
+        float((side_series.astype(str).str.lower() == "long").mean() * 100.0)
+        if trade_count > 0
+        else float("nan")
+    )
+
+    hold_vals: list[float] = []
+    if "entry_time" in trades_df.columns and "exit_time" in trades_df.columns:
+        for _, trade in trades_df.iterrows():
+            entry_time = trade.get("entry_time")
+            exit_time = trade.get("exit_time")
+            if entry_time is None or exit_time is None:
+                continue
+            entry_i = idx_pos.get(pd.Timestamp(entry_time))
+            exit_i = idx_pos.get(pd.Timestamp(exit_time))
+            if entry_i is None or exit_i is None:
+                continue
+            hold_vals.append(float(max(0, int(exit_i) - int(entry_i))))
+
+    avg_bars_held = (sum(hold_vals) / len(hold_vals)) if hold_vals else float("nan")
+    return {
+        "trades": float(trade_count),
+        "long_trade_pct": float(long_trade_pct) if math.isfinite(long_trade_pct) else float("nan"),
+        "avg_bars_held": float(avg_bars_held) if math.isfinite(avg_bars_held) else float("nan"),
+    }
+
+
 def run_spec(spec: dict, *, progress_every: int = 1):
     load_default_plugins()
 
@@ -361,7 +399,6 @@ def run_spec(spec: dict, *, progress_every: int = 1):
             fast_summary_supports_entry = prefilter_exit_supports_entry
 
             if full_system_runner is not None:
-                iter_count += 1
                 _eq, _trades, summary = full_system_runner(
                     df,
                     entry_params=dict(single_rule.get("params", {})),
@@ -371,6 +408,24 @@ def run_spec(spec: dict, *, progress_every: int = 1):
                     sizing_plugin=sizing_plugin,
                     sizing_params=sizing_params,
                 )
+                if monkey_prefilter_cfg is not None:
+                    prefilter_metrics = _build_schedule_metrics_from_trades(df.index, _trades)
+                    prefilter_ok, _prefilter_reasons = prefilter_schedule_matches(prefilter_metrics, monkey_prefilter_cfg)
+                    if not prefilter_ok:
+                        prefilter_reject_count += 1
+                        if progress_every and (attempt_count % progress_every == 0 or attempt_count == total):
+                            elapsed = time.time() - start_ts
+                            eta = (elapsed / attempt_count) * (total - attempt_count) if attempt_count else 0.0
+                            print(
+                                f"[{attempt_count:>4}/{total}] "
+                                f"{(100*attempt_count/total if total else 100.0):6.2f}% | "
+                                f"elapsed {elapsed:6.1f}s | ETA {eta:6.1f}s | "
+                                f"prefilter reject {prefilter_reject_count} | "
+                                f"accepted {iter_count}",
+                                flush=True,
+                            )
+                        continue
+                iter_count += 1
             elif exact_monkey_schedule_usable and single_rule is not None:
                 try:
                     exact_entries, exact_metrics = build_exact_monkey_entries_for_time_exit(
@@ -430,7 +485,6 @@ def run_spec(spec: dict, *, progress_every: int = 1):
                 fast_summary_entries = prefilter_entries_cache
 
             if full_system_runner is None:
-                iter_count += 1
                 if monkey_fast_summary_active and fast_summary_entries is not None:
                     _eq, _trades, summary = run_backtest_limited_time_exit_fast_summary(
                         df_sig,
@@ -450,6 +504,7 @@ def run_spec(spec: dict, *, progress_every: int = 1):
                         exit_params=exit_params,
                         size_fn=size_fn,
                     )
+                iter_count += 1
 
             if save_trades and _trades is not None and not _trades.empty and trade_rows is not None:
                 tdf = _trades.copy()

@@ -1,0 +1,21 @@
+{
+  "favourable_pct": 81.25,
+  "pass_threshold_%": 90.0,
+  "passed": false,
+  "total_iters": 80,
+  "valid_iters": 80,
+  "required_valid_iters": 100,
+  "attempted_iters": 80,
+  "prefilter_rejects": 0,
+  "min_trades": 0,
+  "davey_style": {
+    "enabled": true,
+    "baseline_return_%": 30.189922970257022,
+    "baseline_max_dd_%": 8.089885244386108,
+    "dd_metric": "max_drawdown_abs_%",
+    "return_worse_pct": 81.25,
+    "maxdd_worse_pct": 100.0,
+    "both_worse_pct": 81.25,
+    "pass_rule": "return_worse_pct >= pass_threshold AND maxdd_worse_pct >= pass_threshold"
+  }
+}

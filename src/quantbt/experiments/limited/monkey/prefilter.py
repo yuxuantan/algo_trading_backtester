@@ -88,8 +88,8 @@ def simulate_flat_only_time_exit_schedule(
             hold_bars = int(exit_spec["hold_bars"])
         except Exception:
             return None
-        if hold_bars <= 0:
-            continue
+        if hold_bars < 0:
+            return None
 
         exit_i = min(n_bars - 1, entry_i + hold_bars)
         realized_hold = max(0, int(exit_i - entry_i))

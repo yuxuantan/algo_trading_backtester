@@ -97,6 +97,8 @@ def _resolve_strategy_module(run_meta: dict[str, Any], explicit: str | None) -> 
                 return "quantbt.strategies.interequity_2026_03_liqsweep_a"
             if str(rule.get("name", "")).strip() == "interequity_liqsweepb_entry":
                 return "quantbt.strategies.interequity_2026_03_liqsweep_b"
+            if str(rule.get("name", "")).strip() == "interequity_liqsweepc_entry":
+                return "quantbt.strategies.interequity_2026_03_liqsweep_c"
 
     strategy_tag = str(test_cfg.get("strategy_tag", "")).strip()
     if strategy_tag:

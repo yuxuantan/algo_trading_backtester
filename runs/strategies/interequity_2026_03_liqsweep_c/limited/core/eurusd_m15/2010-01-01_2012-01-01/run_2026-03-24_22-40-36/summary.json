@@ -1,0 +1,11 @@
+{
+  "favourable_pct": 96.0,
+  "pass_threshold_%": 70.0,
+  "passed": false,
+  "total_iters": 25,
+  "valid_iters": 25,
+  "required_valid_iters": 100,
+  "attempted_iters": 25,
+  "prefilter_rejects": 0,
+  "min_trades": 30
+}
