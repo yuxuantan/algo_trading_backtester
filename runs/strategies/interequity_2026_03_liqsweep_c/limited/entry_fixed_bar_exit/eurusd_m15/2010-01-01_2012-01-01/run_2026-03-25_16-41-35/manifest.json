@@ -1,0 +1,13 @@
+{
+  "run_id": "run_2026-03-25_16-41-35",
+  "workflow": "limited",
+  "strategy": "interequity_2026_03_liqsweep_c",
+  "category": "entry_fixed_bar_exit",
+  "dataset_tag": "eurusd_m15_20100101_20120101",
+  "dataset_slug": "eurusd_m15",
+  "date_window": "2010-01-01_2012-01-01",
+  "created_at": "2026-03-25T16:41:35",
+  "run_dir": "runs/strategies/interequity_2026_03_liqsweep_c/limited/entry_fixed_bar_exit/eurusd_m15/2010-01-01_2012-01-01/run_2026-03-25_16-41-35",
+  "scenario_label": "entry_test__interequity_liqsweepc_entry__time_exit",
+  "test_focus": "entry_test"
+}
